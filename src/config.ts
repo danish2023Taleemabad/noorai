@@ -45,4 +45,15 @@ export const config = {
     baseUrl: env('TALEEMABAD_BASE_URL', false, 'https://schools.niete.pk'),
     accessToken: env('TALEEMABAD_ACCESS_TOKEN'),
   },
+
+  // Optional TURN relay for hosts (e.g. Railway) that can't do WebRTC over raw
+  // UDP. Leave empty to use STUN-only (works locally / on UDP-friendly hosts).
+  // TURN over TCP/TLS (turns:...?transport=tcp) is what makes media traverse
+  // Railway's TCP-only networking. TURN_URLS may be comma-separated.
+  turn: {
+    urls: env('TURN_URLS'),
+    username: env('TURN_USERNAME'),
+    credential: env('TURN_CREDENTIAL'),
+    forceRelay: env('TURN_FORCE_RELAY') === 'true',
+  },
 } as const;

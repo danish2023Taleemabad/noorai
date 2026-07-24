@@ -1,0 +1,10 @@
+# Railway build/deploy config. Railway builds from the Dockerfile and exposes
+# the service over HTTPS at your *.up.railway.app domain (used for the webhook).
+[build]
+builder = "dockerfile"
+
+[deploy]
+healthcheckPath = "/"
+healthcheckTimeout = 30
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 10

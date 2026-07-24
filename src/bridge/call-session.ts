@@ -1,4 +1,5 @@
 import wrtcPkg from '@roamhq/wrtc';
+import { config } from '../config.js';
 import { OpenAIRealtimeSession } from './openai-realtime.js';
 import { buildNoorContext } from '../context/build-noor-context.js';
 import {
@@ -65,8 +66,23 @@ export class CallSession {
   }
 
   async createAnswer(offerSdp: string): Promise<string> {
+    // STUN always; add TURN when configured (required on hosts without UDP
+    // reachability, e.g. Railway — use TURN over TCP/TLS there).
+    const iceServers: Record<string, unknown>[] = [
+      { urls: 'stun:stun.l.google.com:19302' },
+    ];
+    if (config.turn.urls) {
+      iceServers.push({
+        urls: config.turn.urls.split(',').map((u) => u.trim()).filter(Boolean),
+        username: config.turn.username || undefined,
+        credential: config.turn.credential || undefined,
+      });
+    }
     const pc = new RTCPeerConnection({
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+      iceServers,
+      // 'relay' forces all media through TURN — useful to guarantee/verify the
+      // relay path on Railway; 'all' lets it try direct first.
+      iceTransportPolicy: config.turn.forceRelay ? 'relay' : 'all',
     });
     this.#pc = pc;
 

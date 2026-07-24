@@ -124,6 +124,32 @@ a general assistant. The endpoint paths mirror the app's api layer, but the
 
 ---
 
+## Deploy to Railway
+
+Railway serves the **webhook (HTTPS)** perfectly. The catch is the **call audio
+(WebRTC/UDP)**: Railway's docs only document HTTP + raw-TCP ingress — **no UDP
+ingress**. Because WhatsApp is `ice-lite` (we initiate outbound), direct media
+*may* work over outbound UDP, but it isn't guaranteed. The reliable fix is a
+**TURN server over TCP/TLS**, which fits Railway's TCP-only networking.
+
+### Steps
+1. Push this repo to GitHub (done) and create a Railway project from it. Railway
+   builds the `Dockerfile` automatically (`railway.toml` pins the builder +
+   healthcheck).
+2. In Railway → **Variables**, add everything from `.env.example`
+   (`WHATSAPP_*`, `OPENAI_*`, `TALEEMABAD_*`, and `TURN_*` if using TURN).
+   Do **not** set `PORT` — Railway injects it; the app binds to it.
+3. Grab the Railway domain (`*.up.railway.app`) → set it as Meta's webhook
+   Callback URL (`https://<domain>/webhook`), verify token = `WHATSAPP_VERIFY_TOKEN`,
+   subscribe to `calls`. You can stop using ngrok now.
+4. **Call and test.** If audio connects, you're done (no TURN needed). If audio
+   doesn't connect, add a TURN server and set `TURN_URLS` / `TURN_USERNAME` /
+   `TURN_CREDENTIAL` (Metered/Twilio/Cloudflare managed TURN, or self-hosted
+   `coturn`). Set `TURN_FORCE_RELAY=true` to force + verify the relay path.
+
+TURN wiring is already in the code (`src/config.ts` + `src/bridge/call-session.ts`)
+— it's a no-op when the `TURN_*` vars are empty.
+
 ## Status / honest limitations
 
 - **Built, not yet call-tested.** The WhatsApp WebRTC↔OpenAI media bridge is

@@ -48,6 +48,20 @@ const handleCallEvent = async (
         `${tag} ▶ connect from ${call.from}` +
           (callerName ? ` (${callerName})` : ''),
       );
+
+      // Clean slate: forcibly tear down ANY existing session before starting a
+      // new one. This is the number's single call line, so any lingering session
+      // is stale (e.g. a prior `terminate` was missed or its id didn't match).
+      // Guarantees each caller gets a fresh, isolated session — no previous
+      // caller's audio/state can bleed in.
+      if (sessions.size > 0) {
+        console.log(`${tag} clearing ${sessions.size} stale session(s)`);
+        for (const [id, stale] of sessions) {
+          stale.close();
+          sessions.delete(id);
+        }
+      }
+
       const session = new CallSession(call.id, call.from ?? 'unknown', callerName);
       sessions.set(call.id, session);
       const startedAt = Date.now();

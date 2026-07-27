@@ -98,6 +98,7 @@ export class CallSession {
     let firstAudioLogged = false;
     this.#realtime = new OpenAIRealtimeSession(instructions, {
       onAudio: (pcm24k) => {
+        if (this.#closed) return; // ignore any late deltas after teardown
         if (!firstAudioLogged) {
           firstAudioLogged = true;
           console.log(`${this.#tag} 🔊 first Noor audio -> caller`);
@@ -264,11 +265,14 @@ export class CallSession {
       /* noop */
     }
     this.#realtime?.close();
+    this.#realtime = null;
     try {
       this.#pc?.close();
     } catch {
       /* noop */
     }
     this.#pc = null;
+    this.#audioSource = null;
+    this.#sink = null;
   }
 }

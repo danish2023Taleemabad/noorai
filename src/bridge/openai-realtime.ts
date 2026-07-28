@@ -20,6 +20,8 @@ export interface RealtimeCallbacks {
   onResponseStarted?: () => void;
   /** Called once the session is created and configured. */
   onOpen?: () => void;
+  /** Called with each finalized transcript line (caller or Noor). */
+  onTranscript?: (role: 'caller' | 'noor', text: string) => void;
   onClose?: () => void;
   onError?: (err: unknown) => void;
 }
@@ -83,6 +85,9 @@ export class OpenAIRealtimeSession {
         input: {
           format: { type: 'audio/pcm', rate: OPENAI_RATE },
           turn_detection: turnDetection,
+          // Transcribe the caller's speech so we can log it (Noor's own
+          // transcript comes back automatically with the audio response).
+          transcription: { model: 'gpt-4o-mini-transcribe' },
         },
         output: {
           format: { type: 'audio/pcm', rate: OPENAI_RATE },
@@ -102,7 +107,7 @@ export class OpenAIRealtimeSession {
   }
 
   #onMessage(raw: unknown): void {
-    let evt: { type?: string; delta?: string };
+    let evt: { type?: string; delta?: string; transcript?: string };
     try {
       evt = JSON.parse(String(raw));
     } catch {
@@ -111,6 +116,14 @@ export class OpenAIRealtimeSession {
     switch (evt.type) {
       case 'session.created':
         this.cb.onOpen?.();
+        break;
+      // Finalized transcripts: caller's speech (input) and Noor's speech (output).
+      case 'conversation.item.input_audio_transcription.completed':
+        if (evt.transcript) this.cb.onTranscript?.('caller', evt.transcript);
+        break;
+      case 'response.output_audio_transcript.done':
+      case 'response.audio_transcript.done': // older event name — support both
+        if (evt.transcript) this.cb.onTranscript?.('noor', evt.transcript);
         break;
       // Response lifecycle — logged to diagnose overlapping/"cluttered" audio.
       case 'response.created':

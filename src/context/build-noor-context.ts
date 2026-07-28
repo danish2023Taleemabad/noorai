@@ -99,12 +99,20 @@ export const buildNoorContext = async (
   try {
     const mem = await getUserMemory(fromNumber);
     if (mem?.summary?.trim()) {
+      console.log(
+        `[memory] injected for ${fromNumber} — ${mem.summary.length} chars, ${mem.callCount} prior call(s)`,
+      );
       memorySection =
-        `\n\n# What you remember about this caller from previous calls\n` +
+        `\n\n# What you already know about this caller (from previous calls)\n` +
         `${mem.summary.trim()}\n` +
-        `Use this naturally — don't recite it back. If it fits, acknowledge that you've spoken before.`;
+        `This is real, remembered information about THIS caller. Treat it as true. ` +
+        `If they ask about something covered here (e.g. what grade/subject they teach, what you discussed before), ANSWER DIRECTLY from this memory. ` +
+        `Weave it in naturally and warmly — like someone who remembers them — but don't robotically recite the whole thing.`;
+    } else {
+      console.log(`[memory] none found for ${fromNumber}`);
     }
-  } catch {
+  } catch (err) {
+    console.warn(`[memory] lookup failed for ${fromNumber}:`, String(err));
     memorySection = '';
   }
 

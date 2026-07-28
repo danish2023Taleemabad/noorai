@@ -55,6 +55,9 @@ export class CallSession {
   #playoutTimer: NodeJS.Timeout | null = null;
   #closed = false;
 
+  // Ordered transcript of the call (caller + Noor turns), for the DB log.
+  #transcript: { role: 'caller' | 'noor'; text: string }[] = [];
+
   constructor(
     public readonly callId: string,
     public readonly fromNumber: string,
@@ -63,6 +66,13 @@ export class CallSession {
 
   get #tag(): string {
     return `[call ${this.callId}]`;
+  }
+
+  /** Full transcript as "Caller: … / Noor: …" lines, in order. */
+  getTranscriptText(): string {
+    return this.#transcript
+      .map((t) => `${t.role === 'caller' ? 'Caller' : 'Noor'}: ${t.text}`)
+      .join('\n');
   }
 
   async createAnswer(offerSdp: string): Promise<string> {
@@ -110,6 +120,10 @@ export class CallSession {
         this.#flushPlayout();
       },
       onOpen: () => console.log(`${this.#tag} OpenAI Realtime connected`),
+      onTranscript: (role, text) => {
+        const clean = text.trim();
+        if (clean) this.#transcript.push({ role, text: clean });
+      },
       onError: (err) => console.warn(`${this.#tag} [realtime] error`, String(err)),
       onClose: () => {
         console.log(`${this.#tag} OpenAI Realtime closed`);

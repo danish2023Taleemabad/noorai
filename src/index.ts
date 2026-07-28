@@ -5,6 +5,7 @@ import {
   receiveWebhook,
   activeCallCount,
 } from './whatsapp/webhook.js';
+import { initDb } from './db.js';
 
 /**
  * Noor — WhatsApp voice agent server.
@@ -35,4 +36,6 @@ app.listen(config.port, () => {
   if (config.publicBaseUrl) {
     console.log(`  webhook: ${config.publicBaseUrl.replace(/\/+$/, '')}/webhook`);
   }
+  // Connect the call-log DB (no-op if DATABASE_URL isn't set).
+  void initDb();
 });

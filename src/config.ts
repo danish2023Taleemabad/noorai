@@ -20,6 +20,13 @@ export const config = {
   port: Number(env('PORT', false, '8080')),
   publicBaseUrl: env('PUBLIC_BASE_URL'),
 
+  // Postgres for call logs + transcripts. Railway injects DATABASE_URL when you
+  // add a Postgres plugin. Empty = logging disabled (calls still work).
+  databaseUrl: env('DATABASE_URL'),
+  // Set DATABASE_SSL=true only for a public/proxy DB URL; Railway's in-project
+  // (private) DATABASE_URL does not use SSL.
+  databaseSsl: env('DATABASE_SSL') === 'true',
+
   whatsapp: {
     phoneNumberId: env('WHATSAPP_PHONE_NUMBER_ID', true),
     wabaId: env('WHATSAPP_WABA_ID'),

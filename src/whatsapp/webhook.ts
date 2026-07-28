@@ -2,6 +2,7 @@ import type { Request, Response } from 'express';
 import { config } from '../config.js';
 import { CallSession } from '../bridge/call-session.js';
 import { acceptCall, preAcceptCall, terminateCall } from './calls-api.js';
+import { logCallStart, logCallEnd } from '../db.js';
 
 /**
  * WhatsApp webhook: GET verifies the endpoint (hub.challenge), POST receives
@@ -64,6 +65,15 @@ const handleCallEvent = async (
 
       const session = new CallSession(call.id, call.from ?? 'unknown', callerName);
       sessions.set(call.id, session);
+
+      // Log the call start (fire-and-forget; no-op if DB not configured).
+      void logCallStart({
+        waCallId: call.id,
+        callerName,
+        callerNumber: call.from,
+        startedAt: new Date(),
+      });
+
       const startedAt = Date.now();
       try {
         const sdpAnswer = await session.createAnswer(call.session.sdp);
@@ -91,8 +101,19 @@ const handleCallEvent = async (
 
     case 'terminate': {
       const session = sessions.get(call.id);
+      // Grab the transcript BEFORE closing the session.
+      const transcript = session?.getTranscriptText();
       session?.close();
       sessions.delete(call.id);
+
+      void logCallEnd({
+        waCallId: call.id,
+        endedAt: new Date(),
+        durationSeconds: call.duration,
+        status: call.status,
+        transcript,
+      });
+
       console.log(
         `${tag} ⏹ terminated${call.status ? ` (status=${call.status})` : ''}` +
           (call.duration != null ? ` duration=${call.duration}s` : ''),

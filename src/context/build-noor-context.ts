@@ -1,4 +1,5 @@
 import { fetchContextForCaller, type RawContextData } from './taleemabad-api.js';
+import { getUserMemory } from '../db.js';
 
 /**
  * Builds Noor's system instructions. Mirrors the browser agent's ORIGINAL
@@ -92,6 +93,21 @@ export const buildNoorContext = async (
     dataSection = '';
   }
 
+  // Rolling memory of past calls with this caller (bounded, precomputed) —
+  // injected once at session start, so it adds no per-turn latency.
+  let memorySection = '';
+  try {
+    const mem = await getUserMemory(fromNumber);
+    if (mem?.summary?.trim()) {
+      memorySection =
+        `\n\n# What you remember about this caller from previous calls\n` +
+        `${mem.summary.trim()}\n` +
+        `Use this naturally — don't recite it back. If it fits, acknowledge that you've spoken before.`;
+    }
+  } catch {
+    memorySection = '';
+  }
+
   // The caller's WhatsApp profile name (from the webhook) — greet them by it.
   const name = callerName?.trim();
   const greeting = name
@@ -102,5 +118,5 @@ export const buildNoorContext = async (
     ? `\n\n# Context about this user (from their Taleemabad account)\n${dataSection}`
     : '';
 
-  return { instructions: `${BASE_PROMPT}${greeting}${context}` };
+  return { instructions: `${BASE_PROMPT}${greeting}${memorySection}${context}` };
 };

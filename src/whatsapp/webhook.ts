@@ -3,6 +3,7 @@ import { config } from '../config.js';
 import { CallSession } from '../bridge/call-session.js';
 import { acceptCall, preAcceptCall, terminateCall } from './calls-api.js';
 import { logCallStart, logCallEnd } from '../db.js';
+import { summarizeAndStore } from '../memory.js';
 
 /**
  * WhatsApp webhook: GET verifies the endpoint (hub.challenge), POST receives
@@ -101,8 +102,9 @@ const handleCallEvent = async (
 
     case 'terminate': {
       const session = sessions.get(call.id);
-      // Grab the transcript BEFORE closing the session.
+      // Grab the transcript + number BEFORE closing the session.
       const transcript = session?.getTranscriptText();
+      const number = session?.fromNumber ?? call.from;
       session?.close();
       sessions.delete(call.id);
 
@@ -113,6 +115,10 @@ const handleCallEvent = async (
         status: call.status,
         transcript,
       });
+
+      // Fold this call into the caller's rolling memory (async, off the live
+      // path; no-op if DB disabled or transcript empty).
+      if (number && transcript) void summarizeAndStore(number, transcript);
 
       console.log(
         `${tag} ⏹ terminated${call.status ? ` (status=${call.status})` : ''}` +

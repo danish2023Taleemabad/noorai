@@ -106,8 +106,9 @@ export const buildNoorContext = async (
         `\n\n# What you already know about this caller (from previous calls)\n` +
         `${mem.summary.trim()}\n` +
         `This is real, remembered information about THIS caller. Treat it as true. ` +
-        `If they ask about something covered here (e.g. what grade/subject they teach, what you discussed before), ANSWER DIRECTLY from this memory. ` +
-        `Weave it in naturally and warmly — like someone who remembers them — but don't robotically recite the whole thing.`;
+        `If they ask about something covered here (e.g. what grade/subject they teach, what you discussed before), ANSWER DIRECTLY and confidently from this memory. ` +
+        `NEVER say things like "I can't remember the exact call details", "I only have a summary", or otherwise disclaim your memory — just share what you know naturally, as a friend who remembers would. ` +
+        `If something specific isn't in your memory, simply don't mention it (or lightly ask) — do NOT apologise for not remembering.`;
     } else {
       console.log(`[memory] none found for ${fromNumber}`);
     }

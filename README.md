@@ -145,13 +145,6 @@ to the Postgres (`postgres.railway.internal`, private, no SSL), and build
 dashboards over `calls` / `user_memory`: volume trends, top callers, peak-hour
 heatmap, retention cohorts, and a searchable transcript viewer.
 
-## Context data (lesson plans / timetable / training) — optional
-
-Fetched from the Taleemabad `sync-*` APIs only when `TALEEMABAD_ACCESS_TOKEN` is
-set (see `src/context/taleemabad-api.ts`); otherwise Noor runs as a general
-assistant. Caller-identity/auth for per-user backend data is the open piece here.
-
----
 
 ## Scripts
 

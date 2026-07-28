@@ -46,6 +46,9 @@ export const config = {
     // (raw silence timer; uses vadSilenceMs).
     turnDetection: env('OPENAI_TURN_DETECTION', false, 'semantic_vad'),
     vadSilenceMs: vadSilenceMs(),
+    // Cheap text model used to summarize past calls into per-user memory
+    // (runs after a call ends — off the live path).
+    memoryModel: env('OPENAI_MEMORY_MODEL', false, 'gpt-4o-mini'),
   },
 
   taleemabad: {

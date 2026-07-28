@@ -39,7 +39,57 @@ export const initDb = async (): Promise<void> => {
       created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
     );
   `);
-  console.log('[db] connected — call logging enabled');
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_calls_number ON calls (caller_number);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_calls_started ON calls (started_at);`);
+  // Per-caller rolling memory (bounded summary of past calls, keyed by number).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_memory (
+      caller_number TEXT PRIMARY KEY,
+      summary       TEXT NOT NULL DEFAULT '',
+      call_count    INTEGER NOT NULL DEFAULT 0,
+      updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+  `);
+  console.log('[db] connected — call logging + memory enabled');
+};
+
+/** Returns the caller's rolling memory summary, or null if none/DB off. */
+export const getUserMemory = async (
+  callerNumber: string,
+): Promise<{ summary: string; callCount: number } | null> => {
+  if (!pool || !callerNumber) return null;
+  try {
+    const res = await pool.query(
+      `SELECT summary, call_count FROM user_memory WHERE caller_number = $1`,
+      [callerNumber],
+    );
+    if (res.rows.length === 0) return null;
+    return { summary: res.rows[0].summary, callCount: res.rows[0].call_count };
+  } catch (err) {
+    console.warn('[db] getUserMemory failed:', String(err));
+    return null;
+  }
+};
+
+/** Upserts the caller's rolling memory summary (bumps call_count). */
+export const upsertUserMemory = async (
+  callerNumber: string,
+  summary: string,
+): Promise<void> => {
+  if (!pool || !callerNumber) return;
+  try {
+    await pool.query(
+      `INSERT INTO user_memory (caller_number, summary, call_count, updated_at)
+       VALUES ($1, $2, 1, now())
+       ON CONFLICT (caller_number) DO UPDATE
+         SET summary = EXCLUDED.summary,
+             call_count = user_memory.call_count + 1,
+             updated_at = now()`,
+      [callerNumber, summary],
+    );
+  } catch (err) {
+    console.warn('[db] upsertUserMemory failed:', String(err));
+  }
 };
 
 /** Records the start of a call. Idempotent on wa_call_id. */

@@ -2,6 +2,7 @@ import wrtcPkg from '@roamhq/wrtc';
 import { config } from '../config.js';
 import { OpenAIRealtimeSession } from './openai-realtime.js';
 import { buildNoorContext } from '../context/build-noor-context.js';
+import { terminateCall } from '../whatsapp/calls-api.js';
 import {
   downmixToMono,
   resampleLinear,
@@ -40,9 +41,16 @@ const MAX_PLAYOUT_SAMPLES = WHATSAPP_RATE * 60;
 const PREBUFFER_SAMPLES = Math.round(WHATSAPP_RATE * 0.12);
 
 // How long to tolerate an ICE 'disconnected' blip before treating it as a real
-// drop and closing. Absorbs brief network hiccups without cutting a live call;
-// a genuine drop (internet off) won't recover within this window.
+// drop and closing. (Note: WhatsApp relays media via a Meta server, so a CALLER
+// drop usually does NOT change our peer state — the no-media watchdog below is
+// what actually catches caller drops. This is only for our-side/relay failures.)
 const DISCONNECT_GRACE_MS = 10_000; // 10s
+
+// No-media watchdog: WhatsApp's relay stops forwarding the caller's audio when
+// the caller drops. If no incoming audio arrives for this long, treat the call
+// as dead → terminate on WhatsApp + close (frees the line fast). Tunable.
+const NO_MEDIA_MS = 10_000; // 10s
+const WATCHDOG_TICK_MS = 2_000;
 
 export class CallSession {
   #pc: InstanceType<typeof RTCPeerConnection> | null = null;
@@ -54,6 +62,8 @@ export class CallSession {
    *  (hangup, media drop, error), so it can free the line. */
   onClose?: () => void;
   #disconnectTimer: NodeJS.Timeout | null = null;
+  #lastAudioAt = 0; // epoch ms of the last incoming caller audio frame (0 = none yet)
+  #mediaWatchdog: NodeJS.Timeout | null = null;
 
   // Playout buffer: a queue of 48 kHz PCM16 chunks + a read head into chunk[0].
   // Chunk-based (not per-sample) so draining is O(frame), never O(n) — the
@@ -154,6 +164,7 @@ export class CallSession {
         channelCount?: number;
       }) => {
         if (this.#closed || !this.#realtime) return;
+        this.#lastAudioAt = Date.now(); // for the no-media watchdog
         if (!firstCallerAudioLogged) {
           firstCallerAudioLogged = true;
           console.log(
@@ -201,7 +212,28 @@ export class CallSession {
     await this.#waitForIceGathering(pc);
 
     this.#startPlayout();
+    this.#startMediaWatchdog();
     return pc.localDescription.sdp as string;
+  }
+
+  /**
+   * Detects a caller drop by watching for incoming audio to stop. (ICE state
+   * can't see it — WhatsApp relays via a Meta server that stays connected.)
+   */
+  #startMediaWatchdog(): void {
+    this.#mediaWatchdog = setInterval(() => {
+      if (this.#closed) return;
+      if (this.#lastAudioAt === 0) return; // no audio yet — still connecting
+      const gap = Date.now() - this.#lastAudioAt;
+      if (gap >= NO_MEDIA_MS) {
+        console.warn(
+          `${this.#tag} no caller audio for ${gap}ms — treating as dropped`,
+        );
+        // Tell WhatsApp to end it too (releases the relay leg), then tear down.
+        void terminateCall(this.callId).catch(() => undefined);
+        this.close();
+      }
+    }, WATCHDOG_TICK_MS);
   }
 
   #enqueuePlayout(pcm24k: Int16Array): void {
@@ -298,6 +330,8 @@ export class CallSession {
     this.#closed = true;
     if (this.#disconnectTimer) clearTimeout(this.#disconnectTimer);
     this.#disconnectTimer = null;
+    if (this.#mediaWatchdog) clearInterval(this.#mediaWatchdog);
+    this.#mediaWatchdog = null;
     if (this.#playoutTimer) clearInterval(this.#playoutTimer);
     this.#playoutTimer = null;
     this.#flushPlayout();

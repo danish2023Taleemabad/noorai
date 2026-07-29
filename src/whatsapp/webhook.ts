@@ -1,7 +1,7 @@
 import type { Request, Response } from 'express';
 import { config } from '../config.js';
 import { CallSession } from '../bridge/call-session.js';
-import { acceptCall, preAcceptCall, terminateCall } from './calls-api.js';
+import { acceptCall, preAcceptCall, rejectCall, terminateCall } from './calls-api.js';
 import { logCallStart, logCallEnd } from '../db.js';
 import { summarizeAndStore } from '../memory.js';
 
@@ -51,20 +51,22 @@ const handleCallEvent = async (
           (callerName ? ` (${callerName})` : ''),
       );
 
-      // Clean slate: forcibly tear down ANY existing session before starting a
-      // new one. This is the number's single call line, so any lingering session
-      // is stale (e.g. a prior `terminate` was missed or its id didn't match).
-      // Guarantees each caller gets a fresh, isolated session — no previous
-      // caller's audio/state can bleed in.
+      // The number is a single call line: if a call is already active, this new
+      // one is "busy" — reject it and LEAVE the existing call running untouched.
+      // (Sessions self-remove from this map on close, and there's a max-duration
+      // safety in CallSession, so a dead call can never keep the line stuck.)
       if (sessions.size > 0) {
-        console.log(`${tag} clearing ${sessions.size} stale session(s)`);
-        for (const [id, stale] of sessions) {
-          stale.close();
-          sessions.delete(id);
-        }
+        console.log(
+          `${tag} busy — a call is already active; rejecting ${call.from}`,
+        );
+        await rejectCall(call.id).catch(() => undefined);
+        return;
       }
 
       const session = new CallSession(call.id, call.from ?? 'unknown', callerName);
+      // Remove from the active map whenever the session closes (normal hangup,
+      // media drop, error, or max-duration) so the line frees itself.
+      session.onClose = () => sessions.delete(call.id);
       sessions.set(call.id, session);
 
       // Log the call start (fire-and-forget; no-op if DB not configured).

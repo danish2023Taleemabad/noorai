@@ -39,11 +39,21 @@ const MAX_PLAYOUT_SAMPLES = WHATSAPP_RATE * 60;
 // talk-spurt, not per word.
 const PREBUFFER_SAMPLES = Math.round(WHATSAPP_RATE * 0.12);
 
+// How long to tolerate an ICE 'disconnected' blip before treating it as a real
+// drop and closing. Absorbs brief network hiccups without cutting a live call;
+// a genuine drop (internet off) won't recover within this window.
+const DISCONNECT_GRACE_MS = 10_000; // 10s
+
 export class CallSession {
   #pc: InstanceType<typeof RTCPeerConnection> | null = null;
   #realtime: OpenAIRealtimeSession | null = null;
   #audioSource: any = null;
   #sink: any = null;
+
+  /** Set by the webhook — invoked once when the session closes, for any reason
+   *  (hangup, media drop, error), so it can free the line. */
+  onClose?: () => void;
+  #disconnectTimer: NodeJS.Timeout | null = null;
 
   // Playout buffer: a queue of 48 kHz PCM16 chunks + a read head into chunk[0].
   // Chunk-based (not per-sample) so draining is O(frame), never O(n) — the
@@ -164,8 +174,24 @@ export class CallSession {
     pc.onconnectionstatechange = () => {
       const state = pc.connectionState;
       console.log(`${this.#tag} peer state: ${state}`);
-      if (state === 'failed' || state === 'closed' || state === 'disconnected') {
-        this.close();
+      if (state === 'connected') {
+        // (Re)connected — cancel any pending disconnect grace.
+        if (this.#disconnectTimer) {
+          clearTimeout(this.#disconnectTimer);
+          this.#disconnectTimer = null;
+        }
+        return;
+      }
+      if (state === 'failed' || state === 'closed') {
+        this.close(); // definite drop / already tearing down
+        return;
+      }
+      if (state === 'disconnected' && !this.#disconnectTimer) {
+        // Might be a brief blip — wait; close only if it doesn't recover.
+        this.#disconnectTimer = setTimeout(() => {
+          console.warn(`${this.#tag} still disconnected after grace — closing`);
+          this.close();
+        }, DISCONNECT_GRACE_MS);
       }
     };
 
@@ -270,6 +296,8 @@ export class CallSession {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    if (this.#disconnectTimer) clearTimeout(this.#disconnectTimer);
+    this.#disconnectTimer = null;
     if (this.#playoutTimer) clearInterval(this.#playoutTimer);
     this.#playoutTimer = null;
     this.#flushPlayout();
@@ -288,5 +316,10 @@ export class CallSession {
     this.#pc = null;
     this.#audioSource = null;
     this.#sink = null;
+    try {
+      this.onClose?.();
+    } catch {
+      /* noop */
+    }
   }
 }

@@ -46,11 +46,13 @@ const PREBUFFER_SAMPLES = Math.round(WHATSAPP_RATE * 0.12);
 // what actually catches caller drops. This is only for our-side/relay failures.)
 const DISCONNECT_GRACE_MS = 10_000; // 10s
 
-// No-media watchdog: WhatsApp's relay stops forwarding the caller's audio when
-// the caller drops. If no incoming audio arrives for this long, treat the call
-// as dead → terminate on WhatsApp + close (frees the line fast). Tunable.
-const NO_MEDIA_MS = 10_000; // 10s
-const WATCHDOG_TICK_MS = 2_000;
+// "Caller gone" watchdog. WhatsApp relays audio continuously and never promptly
+// tells us about a drop, and ICE stays connected (media goes via a Meta server).
+// So the reliable signal is: has the caller produced any REAL speech recently?
+// If there's been no real caller speech for this long, end the call. Each tick
+// also logs incoming audio energy (RMS) so we can see what Meta sends post-drop.
+const NO_INPUT_MS = 60_000; // 60s of no real caller speech → end
+const WATCHDOG_TICK_MS = 5_000;
 
 export class CallSession {
   #pc: InstanceType<typeof RTCPeerConnection> | null = null;
@@ -62,8 +64,9 @@ export class CallSession {
    *  (hangup, media drop, error), so it can free the line. */
   onClose?: () => void;
   #disconnectTimer: NodeJS.Timeout | null = null;
-  #lastAudioAt = 0; // epoch ms of the last incoming caller audio frame (0 = none yet)
-  #mediaWatchdog: NodeJS.Timeout | null = null;
+  #lastActivityAt = 0; // epoch ms of last speech activity — caller OR Noor
+  #peakRmsSinceTick = 0; // loudest incoming frame since last heartbeat (diagnostic)
+  #watchdog: NodeJS.Timeout | null = null;
 
   // Playout buffer: a queue of 48 kHz PCM16 chunks + a read head into chunk[0].
   // Chunk-based (not per-sample) so draining is O(frame), never O(n) — the
@@ -129,6 +132,7 @@ export class CallSession {
     this.#realtime = new OpenAIRealtimeSession(instructions, {
       onAudio: (pcm24k) => {
         if (this.#closed) return; // ignore any late deltas after teardown
+        this.#lastActivityAt = Date.now(); // Noor is speaking = activity
         if (!firstAudioLogged) {
           firstAudioLogged = true;
           console.log(`${this.#tag} 🔊 first Noor audio -> caller`);
@@ -142,7 +146,10 @@ export class CallSession {
       onOpen: () => console.log(`${this.#tag} OpenAI Realtime connected`),
       onTranscript: (role, text) => {
         const clean = text.trim();
-        if (clean) this.#transcript.push({ role, text: clean });
+        if (!clean) return;
+        this.#transcript.push({ role, text: clean });
+        // Real caller speech counts as activity (resets the silence timer).
+        if (role === 'caller') this.#lastActivityAt = Date.now();
       },
       onError: (err) => console.warn(`${this.#tag} [realtime] error`, String(err)),
       onClose: () => {
@@ -164,7 +171,6 @@ export class CallSession {
         channelCount?: number;
       }) => {
         if (this.#closed || !this.#realtime) return;
-        this.#lastAudioAt = Date.now(); // for the no-media watchdog
         if (!firstCallerAudioLogged) {
           firstCallerAudioLogged = true;
           console.log(
@@ -175,6 +181,12 @@ export class CallSession {
         // Downmix any stereo to mono, then resample from the ACTUAL input rate
         // (16 kHz in practice) to OpenAI's 24 kHz.
         const mono = downmixToMono(data.samples, data.channelCount ?? 1);
+        // Track loudest recent incoming frame (RMS) — diagnostic for whether
+        // Meta sends silence vs noise after a caller drop.
+        let sumSq = 0;
+        for (let i = 0; i < mono.length; i += 1) sumSq += mono[i] * mono[i];
+        const rms = mono.length ? Math.sqrt(sumSq / mono.length) : 0;
+        if (rms > this.#peakRmsSinceTick) this.#peakRmsSinceTick = rms;
         const pcm24k = resampleLinear(mono, data.sampleRate, OPENAI_RATE);
         this.#realtime.appendAudio(pcm24k);
       };
@@ -211,25 +223,34 @@ export class CallSession {
     await pc.setLocalDescription(answer);
     await this.#waitForIceGathering(pc);
 
+    this.#lastActivityAt = Date.now(); // start the silence countdown
     this.#startPlayout();
-    this.#startMediaWatchdog();
+    this.#startWatchdog();
     return pc.localDescription.sdp as string;
   }
 
   /**
-   * Detects a caller drop by watching for incoming audio to stop. (ICE state
-   * can't see it — WhatsApp relays via a Meta server that stays connected.)
+   * Ends the call after NO_INPUT_MS of MUTUAL silence — neither the caller nor
+   * Noor has produced speech. This is the reliable "caller gone" signal here:
+   * WhatsApp relays audio continuously and ICE stays connected, so neither can
+   * detect a drop, but a dropped call goes fully silent. A caller who is just
+   * listening to Noor is NOT silence (Noor speaking resets the timer), so a live
+   * call is never cut. Each tick logs peak incoming RMS to reveal what Meta
+   * relays after a drop (silence vs noise).
    */
-  #startMediaWatchdog(): void {
-    this.#mediaWatchdog = setInterval(() => {
+  #startWatchdog(): void {
+    this.#watchdog = setInterval(() => {
       if (this.#closed) return;
-      if (this.#lastAudioAt === 0) return; // no audio yet — still connecting
-      const gap = Date.now() - this.#lastAudioAt;
-      if (gap >= NO_MEDIA_MS) {
+      const silenceMs = Date.now() - this.#lastActivityAt;
+      const peakRms = Math.round(this.#peakRmsSinceTick);
+      this.#peakRmsSinceTick = 0;
+      console.log(
+        `${this.#tag} [watchdog] silence=${Math.round(silenceMs / 1000)}s peakRms=${peakRms}`,
+      );
+      if (silenceMs >= NO_INPUT_MS) {
         console.warn(
-          `${this.#tag} no caller audio for ${gap}ms — treating as dropped`,
+          `${this.#tag} ${Math.round(silenceMs / 1000)}s of mutual silence — ending call`,
         );
-        // Tell WhatsApp to end it too (releases the relay leg), then tear down.
         void terminateCall(this.callId).catch(() => undefined);
         this.close();
       }
@@ -330,8 +351,8 @@ export class CallSession {
     this.#closed = true;
     if (this.#disconnectTimer) clearTimeout(this.#disconnectTimer);
     this.#disconnectTimer = null;
-    if (this.#mediaWatchdog) clearInterval(this.#mediaWatchdog);
-    this.#mediaWatchdog = null;
+    if (this.#watchdog) clearInterval(this.#watchdog);
+    this.#watchdog = null;
     if (this.#playoutTimer) clearInterval(this.#playoutTimer);
     this.#playoutTimer = null;
     this.#flushPlayout();

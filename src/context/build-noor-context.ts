@@ -120,7 +120,7 @@ export const buildNoorContext = async (
   // The caller's WhatsApp profile name (from the webhook) — greet them by it.
   const name = callerName?.trim();
   const greeting = name
-    ? `\n\nThe caller's name is ${name}. Greet them FIRST, in Urdu, cheerfully and casually by name (e.g. "Arre ${name}! Assalam-o-Alaikum, main Noor hoon, hehe… kaise ho aap? Bataiye main kya help kardoon?").`
+    ? `\n\nThe caller's name is ${name}. Greet them FIRST, in Urdu, cheerfully and casually by name (e.g. "Assalam-o-Alaikum ${name}!, main Noor hoon, kaise hen aap? Bataiye main kya help kar sakti hoon?").`
     : '';
 
   const context = dataSection

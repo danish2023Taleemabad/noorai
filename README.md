@@ -45,6 +45,8 @@ after hang-up:  transcript ─► gpt-4o-mini summary ─► Postgres `user_memo
   per-caller memory, and (optional) lesson-plan/timetable/training data.
 - **`src/db.ts`** — Postgres: `calls` (log + transcript) and `user_memory`.
 - **`src/memory.ts`** — async post-call summarizer (bounded rolling memory).
+- **`src/curriculum.ts`** — boot-time load of the curriculum matrix into RAM +
+  the `lookup_curriculum` tool's in-memory lookup (grade × subject).
 
 ---
 
@@ -76,6 +78,8 @@ npm install
 | `OPENAI_MEMORY_MODEL` | summarizer model (default `gpt-4o-mini`) |
 | `DATABASE_URL` | Postgres (Railway injects it); blank = logging/memory off |
 | `TALEEMABAD_BASE_URL` / `TALEEMABAD_ACCESS_TOKEN` | Optional backend context |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | Read-only Google service-account (one-line JSON) for the curriculum matrix; blank = curriculum off |
+| `CURRICULUM_SHEET_ID` / `CURRICULUM_TAB` | Curriculum matrix sheet + tab (defaults baked in) |
 | `TURN_URLS` / `TURN_USERNAME` / `TURN_CREDENTIAL` | Optional TURN fallback |
 
 ### 3. Run locally + expose
@@ -137,6 +141,25 @@ summary** (≤1,500 chars, rewritten not appended via `gpt-4o-mini`) stored in
 **`user_memory`** keyed by phone number. On the next call, that summary is
 injected into Noor's system prompt **at connect** — so Noor remembers the caller
 with **no per-turn latency** and the memory never grows unbounded.
+
+## Curriculum / lesson plans
+
+Noor can help with the Taleemabad curriculum (Grades 1–5, English / Maths / Urdu)
+— chapters and daily topics. At **boot**, `curriculum.ts` reads the curriculum
+matrix (a Google Sheet, "All Segments + SLOs" tab) **once** and flattens it into
+per-(grade × subject) slices held in RAM. Every lookup after that is an in-memory
+read, so there is **no network on the live call path and no added latency**.
+
+Two paths, both latency-free:
+- **Returning caller** whose grade + subject we already know → the matching slice
+  is injected into the prompt at connect (no tool call).
+- **First-time / unknown caller** → Noor calls the `lookup_curriculum(grade, subject)`
+  function tool, which does the RAM lookup and **remembers** the grade + subject
+  in `user_memory` (so the next call injects it automatically).
+
+Auth is a read-only Google service account (`GOOGLE_SERVICE_ACCOUNT_JSON`) used
+only at boot; no extra npm dependency (JWT is minted with Node's `crypto`). If the
+service account isn't set, curriculum is simply disabled and Noor runs as before.
 
 ## Dashboard (Metabase)
 

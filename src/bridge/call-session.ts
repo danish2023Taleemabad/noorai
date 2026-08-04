@@ -4,6 +4,12 @@ import { OpenAIRealtimeSession } from './openai-realtime.js';
 import { buildNoorContext } from '../context/build-noor-context.js';
 import { terminateCall } from '../whatsapp/calls-api.js';
 import {
+  getCurriculumSlice,
+  normalizeGrade,
+  normalizeSubject,
+} from '../curriculum.js';
+import { setUserMemoryGradeSubject } from '../db.js';
+import {
   downmixToMono,
   resampleLinear,
   upsample24to48,
@@ -150,6 +156,26 @@ export class CallSession {
         this.#transcript.push({ role, text: clean });
         // Real caller speech counts as activity (resets the silence timer).
         if (role === 'caller') this.#lastActivityAt = Date.now();
+      },
+      onToolCall: async (name, args) => {
+        if (name !== 'lookup_curriculum') return 'Unknown tool.';
+        const grade = String(args.grade ?? '');
+        const subject = String(args.subject ?? '');
+        const slice = getCurriculumSlice(grade, subject);
+        // Remember grade+subject so the next call injects it at connect (no tool
+        // call needed then). Fire-and-forget — never blocks the response.
+        const g = normalizeGrade(grade);
+        const s = normalizeSubject(subject);
+        if (g && s) {
+          void setUserMemoryGradeSubject(this.fromNumber, g, s).catch(
+            () => undefined,
+          );
+        }
+        if (!slice) {
+          return `No curriculum found for grade "${grade}" subject "${subject}". Available: Grades 1-5, subjects English, Maths, and Urdu.`;
+        }
+        console.log(`${this.#tag} [curriculum] served Grade ${g} ${s}`);
+        return slice;
       },
       onError: (err) => console.warn(`${this.#tag} [realtime] error`, String(err)),
       onClose: () => {

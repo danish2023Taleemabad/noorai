@@ -56,6 +56,21 @@ export const config = {
     accessToken: env('TALEEMABAD_ACCESS_TOKEN'),
   },
 
+  // Google service account (read-only) used ONCE at boot to load the curriculum
+  // matrix into RAM. Empty = curriculum context disabled (Noor still works).
+  google: {
+    serviceAccountJson: env('GOOGLE_SERVICE_ACCOUNT_JSON'),
+  },
+  // The Taleemabad curriculum matrix sheet + the flat "All Segments + SLOs" tab.
+  curriculum: {
+    sheetId: env(
+      'CURRICULUM_SHEET_ID',
+      false,
+      '1nzrAZ0LUIRxKoGh3GsuES86P5w_E3RbYf2kZ9SAppTg',
+    ),
+    tabName: env('CURRICULUM_TAB', false, 'All Segments + SLOs'),
+  },
+
   // Optional TURN relay for hosts (e.g. Railway) that can't do WebRTC over raw
   // UDP. Leave empty to use STUN-only (works locally / on UDP-friendly hosts).
   // TURN over TCP/TLS (turns:...?transport=tcp) is what makes media traverse

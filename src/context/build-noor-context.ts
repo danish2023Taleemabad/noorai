@@ -1,5 +1,6 @@
 import { fetchContextForCaller, type RawContextData } from './taleemabad-api.js';
 import { getUserMemory } from '../db.js';
+import { getCurriculumSlice, curriculumStatus } from '../curriculum.js';
 
 /**
  * Builds Noor's system instructions. Mirrors the browser agent's ORIGINAL
@@ -96,8 +97,12 @@ export const buildNoorContext = async (
   // Rolling memory of past calls with this caller (bounded, precomputed) —
   // injected once at session start, so it adds no per-turn latency.
   let memorySection = '';
+  let callerGrade: string | null = null;
+  let callerSubject: string | null = null;
   try {
     const mem = await getUserMemory(fromNumber);
+    callerGrade = mem?.grade ?? null;
+    callerSubject = mem?.subject ?? null;
     if (mem?.summary?.trim()) {
       console.log(
         `[memory] injected for ${fromNumber} — ${mem.summary.length} chars, ${mem.callCount} prior call(s)`,
@@ -127,5 +132,31 @@ export const buildNoorContext = async (
     ? `\n\n# Context about this user (from their Taleemabad account)\n${dataSection}`
     : '';
 
-  return { instructions: `${BASE_PROMPT}${greeting}${memorySection}${context}` };
+  // Curriculum help. The whole matrix is preloaded in RAM; we tell Noor how to
+  // reach it (the lookup_curriculum tool) and, for a returning caller whose
+  // grade+subject we already know, inject that slice up front so no tool call
+  // is even needed. Both paths are latency-free (no network on the call path).
+  let curriculumSection = '';
+  if (curriculumStatus().loaded) {
+    curriculumSection =
+      `\n\n# Lesson plans / curriculum\n` +
+      `You can help with the Taleemabad curriculum for Grades 1 to 5 in English, Maths and Urdu — its chapters and daily topics. ` +
+      `You have a tool, lookup_curriculum(grade, subject), that returns that grade+subject's curriculum. ` +
+      `When a caller asks about lesson plans, chapters, or what to teach/study, and you don't already have that grade+subject's curriculum in this prompt, CALL lookup_curriculum with their grade and subject, then answer warmly from what it returns. ` +
+      `If they haven't told you the grade or subject yet, ask them first (cheerfully), then look it up. ` +
+      `Only Grades 1-5 English/Maths/Urdu are available; if they ask beyond that, say so nicely.`;
+
+    const known = getCurriculumSlice(callerGrade ?? undefined, callerSubject ?? undefined);
+    if (known) {
+      console.log(
+        `[curriculum] injected Grade ${callerGrade} ${callerSubject} at connect for ${fromNumber}`,
+      );
+      curriculumSection +=
+        `\n\n## This caller's curriculum (Grade ${callerGrade} ${callerSubject}) — already loaded, use it directly (no tool call needed):\n${known}`;
+    }
+  }
+
+  return {
+    instructions: `${BASE_PROMPT}${greeting}${memorySection}${context}${curriculumSection}`,
+  };
 };

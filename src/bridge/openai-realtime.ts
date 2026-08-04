@@ -22,6 +22,12 @@ export interface RealtimeCallbacks {
   onOpen?: () => void;
   /** Called with each finalized transcript line (caller or Noor). */
   onTranscript?: (role: 'caller' | 'noor', text: string) => void;
+  /**
+   * Called when the model invokes a function tool. Returns the tool's output
+   * text (fed back to the model). If provided, the lookup_curriculum tool is
+   * registered on the session.
+   */
+  onToolCall?: (name: string, args: Record<string, unknown>) => Promise<string>;
   onClose?: () => void;
   onError?: (err: unknown) => void;
 }
@@ -29,6 +35,9 @@ export interface RealtimeCallbacks {
 export class OpenAIRealtimeSession {
   #ws: WebSocket | null = null;
   #ready = false;
+  // Maps a function-call id -> tool name (name arrives on output_item.added,
+  // arguments arrive later on the .done event).
+  #toolNames = new Map<string, string>();
 
   constructor(
     private readonly instructions: string,
@@ -99,6 +108,34 @@ export class OpenAIRealtimeSession {
       session.reasoning = { effort: config.openai.reasoningEffort };
     }
 
+    // Register the curriculum lookup tool when a handler is wired up. The model
+    // calls this only when a caller asks about lesson plans and we don't already
+    // have their curriculum in the prompt — so it never touches normal chat.
+    if (this.cb.onToolCall) {
+      session.tools = [
+        {
+          type: 'function',
+          name: 'lookup_curriculum',
+          description:
+            'Get the Taleemabad curriculum (chapters and daily topics) for a given grade and subject. ' +
+            'Call this when the caller asks about lesson plans, chapters, or what to teach/study and you do ' +
+            'not already have that grade+subject curriculum in your context. Grades 1-5; subjects English, Maths, Urdu.',
+          parameters: {
+            type: 'object',
+            properties: {
+              grade: { type: 'string', description: 'Grade number, 1 to 5' },
+              subject: {
+                type: 'string',
+                description: 'Subject: English, Maths, or Urdu',
+              },
+            },
+            required: ['grade', 'subject'],
+          },
+        },
+      ];
+      session.tool_choice = 'auto';
+    }
+
     this.#send({ type: 'session.update', session });
     this.#ready = true;
 
@@ -107,7 +144,15 @@ export class OpenAIRealtimeSession {
   }
 
   #onMessage(raw: unknown): void {
-    let evt: { type?: string; delta?: string; transcript?: string };
+    let evt: {
+      type?: string;
+      delta?: string;
+      transcript?: string;
+      call_id?: string;
+      name?: string;
+      arguments?: string;
+      item?: { type?: string; call_id?: string; name?: string };
+    };
     try {
       evt = JSON.parse(String(raw));
     } catch {
@@ -143,12 +188,59 @@ export class OpenAIRealtimeSession {
         // Caller started talking -> model should stop (barge-in).
         this.cb.onResponseStarted?.();
         break;
+      // Function calling: the tool name arrives with the new output item; the
+      // arguments arrive (complete) on the .done event.
+      case 'response.output_item.added':
+        if (evt.item?.type === 'function_call' && evt.item.call_id) {
+          this.#toolNames.set(evt.item.call_id, evt.item.name ?? '');
+        }
+        break;
+      case 'response.function_call_arguments.done':
+        void this.#handleFunctionCall(
+          evt.call_id ?? '',
+          evt.name,
+          evt.arguments ?? '{}',
+        );
+        break;
       case 'error':
         this.cb.onError?.(String(raw));
         break;
       default:
         break;
     }
+  }
+
+  /**
+   * Run a function call: parse args, invoke the handler, feed the output back to
+   * the model, then ask it to continue (speak the answer). The handler itself is
+   * an in-memory lookup, so this adds no network round-trip.
+   */
+  async #handleFunctionCall(
+    callId: string,
+    name: string | undefined,
+    argsJson: string,
+  ): Promise<void> {
+    const fnName = name || this.#toolNames.get(callId) || '';
+    this.#toolNames.delete(callId);
+    let args: Record<string, unknown> = {};
+    try {
+      args = JSON.parse(argsJson || '{}') as Record<string, unknown>;
+    } catch {
+      /* leave args empty */
+    }
+    let output = '';
+    try {
+      output = (await this.cb.onToolCall?.(fnName, args)) ?? '';
+    } catch (err) {
+      this.cb.onError?.(err);
+      output = 'Sorry, that lookup did not work just now.';
+    }
+    if (!callId) return;
+    this.#send({
+      type: 'conversation.item.create',
+      item: { type: 'function_call_output', call_id: callId, output },
+    });
+    this.#send({ type: 'response.create' });
   }
 
   /** Push 24 kHz PCM16 caller audio to the model. */

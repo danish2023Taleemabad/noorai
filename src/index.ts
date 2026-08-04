@@ -6,6 +6,7 @@ import {
   activeCallCount,
 } from './whatsapp/webhook.js';
 import { initDb } from './db.js';
+import { loadCurriculum } from './curriculum.js';
 
 /**
  * Noor — WhatsApp voice agent server.
@@ -38,4 +39,7 @@ app.listen(config.port, () => {
   }
   // Connect the call-log DB (no-op if DATABASE_URL isn't set).
   void initDb();
+  // Load the curriculum matrix into RAM once, off the call path (no-op if the
+  // Google service account isn't configured). Never blocks calls.
+  void loadCurriculum();
 });

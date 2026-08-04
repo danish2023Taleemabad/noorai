@@ -50,24 +50,65 @@ export const initDb = async (): Promise<void> => {
       updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
     );
   `);
+  // Structured grade/subject remembered per caller — lets us inject the right
+  // curriculum slice at connect on their next call (added after the table
+  // existed, so ADD COLUMN IF NOT EXISTS keeps older DBs working).
+  await pool.query(`ALTER TABLE user_memory ADD COLUMN IF NOT EXISTS grade TEXT;`);
+  await pool.query(`ALTER TABLE user_memory ADD COLUMN IF NOT EXISTS subject TEXT;`);
   console.log('[db] connected — call logging + memory enabled');
 };
 
 /** Returns the caller's rolling memory summary, or null if none/DB off. */
 export const getUserMemory = async (
   callerNumber: string,
-): Promise<{ summary: string; callCount: number } | null> => {
+): Promise<{
+  summary: string;
+  callCount: number;
+  grade: string | null;
+  subject: string | null;
+} | null> => {
   if (!pool || !callerNumber) return null;
   try {
     const res = await pool.query(
-      `SELECT summary, call_count FROM user_memory WHERE caller_number = $1`,
+      `SELECT summary, call_count, grade, subject FROM user_memory WHERE caller_number = $1`,
       [callerNumber],
     );
     if (res.rows.length === 0) return null;
-    return { summary: res.rows[0].summary, callCount: res.rows[0].call_count };
+    return {
+      summary: res.rows[0].summary,
+      callCount: res.rows[0].call_count,
+      grade: res.rows[0].grade ?? null,
+      subject: res.rows[0].subject ?? null,
+    };
   } catch (err) {
     console.warn('[db] getUserMemory failed:', String(err));
     return null;
+  }
+};
+
+/**
+ * Remember a caller's grade + subject (from a curriculum lookup during a call),
+ * without touching their rolling summary or call count. COALESCE keeps an
+ * existing value if a null is passed. Next call injects the matching slice.
+ */
+export const setUserMemoryGradeSubject = async (
+  callerNumber: string,
+  grade: string | null,
+  subject: string | null,
+): Promise<void> => {
+  if (!pool || !callerNumber) return;
+  try {
+    await pool.query(
+      `INSERT INTO user_memory (caller_number, grade, subject, updated_at)
+       VALUES ($1, $2, $3, now())
+       ON CONFLICT (caller_number) DO UPDATE
+         SET grade = COALESCE(EXCLUDED.grade, user_memory.grade),
+             subject = COALESCE(EXCLUDED.subject, user_memory.subject),
+             updated_at = now()`,
+      [callerNumber, grade, subject],
+    );
+  } catch (err) {
+    console.warn('[db] setUserMemoryGradeSubject failed:', String(err));
   }
 };
 

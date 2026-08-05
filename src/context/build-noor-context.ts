@@ -26,6 +26,18 @@ If you don't know something about their data, say so honestly (cheerfully!). Do 
 
 const MAX_ITEMS = 12;
 
+// Noor's callers are in Pakistan; show/interpret all dates in Pakistan time so
+// "today"/"yesterday"/"1st August" line up with what the caller means.
+const KARACHI = 'Asia/Karachi';
+/** A Date -> "YYYY-MM-DD" in Pakistan time. */
+const pktDate = (d: Date): string =>
+  new Intl.DateTimeFormat('en-CA', {
+    timeZone: KARACHI,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(d);
+
 const readField = (obj: unknown, keys: string[]): string | undefined => {
   if (!obj || typeof obj !== 'object') return undefined;
   const record = obj as Record<string, unknown>;
@@ -128,6 +140,21 @@ export const buildNoorContext = async (
     ? `\n\nThe caller's name is ${name}. Greet them FIRST, in Urdu, cheerfully and casually by name (e.g. "Heyy ${name}! Assalam-o-Alaikum, main Noor hoon, kaise hen aap? Bataiye main aapki kya help kar sakti hoon?").`
     : '';
 
+  // Tell Noor the current date (Pakistan time) so it can resolve "today",
+  // "yesterday", "last week", "1st August", etc. — and form on_date correctly.
+  const now = new Date();
+  const todayLong = new Intl.DateTimeFormat('en-US', {
+    timeZone: KARACHI,
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  }).format(now);
+  const dateLine =
+    `\n\nToday's date is ${todayLong} (${pktDate(now)}), Pakistan time. ` +
+    `Use this to interpret relative dates like "today", "yesterday", "last week", or "last month". ` +
+    `When you call search_rumi_history with on_date, format it as YYYY-MM-DD in Pakistan time.`;
+
   const context = dataSection
     ? `\n\n# Context about this user (from their Taleemabad account)\n${dataSection}`
     : '';
@@ -186,6 +213,12 @@ export const buildNoorContext = async (
       if (rumi.quizzesCount) stats.push(`Quizzes: ${rumi.quizzesCount}`);
       if (rumi.messageCount)
         stats.push(`Total messages exchanged with Rumi: ${rumi.messageCount}`);
+      if (rumi.firstMessageAt) {
+        const firstMsg = rumi.firstMessageText
+          ? ` (their first message: "${rumi.firstMessageText.replace(/\s+/g, ' ').slice(0, 120)}")`
+          : '';
+        stats.push(`First started talking to Rumi on: ${fmtDate(rumi.firstMessageAt)}${firstMsg}`);
+      }
       if (rumi.lastMessageAt)
         stats.push(`Last talked to Rumi on: ${fmtDate(rumi.lastMessageAt)}`);
 
@@ -213,15 +246,17 @@ export const buildNoorContext = async (
         (rumi.summary?.trim()
           ? `\nWhat you've discussed with them before:\n${rumi.summary.trim()}\n`
           : '') +
-        `\nIf they ask about something SPECIFIC from a past chat that isn't in the recent messages or summary above (even from long ago), ` +
-        `call the search_rumi_history tool with a few keywords to find it, then answer from what it returns. ` +
-        `Never claim you don't remember — recall from above, or search first.`;
+        `\nFor anything not already shown above, use the search_rumi_history tool — it can look up their whole Rumi history:\n` +
+        `- a specific topic → pass keywords in "query"\n` +
+        `- their FIRST/earliest messages ("what did I first ask", "when did I start") → pass order="oldest"\n` +
+        `- a specific day → pass on_date="YYYY-MM-DD"\n` +
+        `Then answer from what it returns. You have their FULL history — NEVER say you don't have the data; if unsure, search first.`;
     }
   } catch (err) {
     console.warn(`[rumi] profile lookup failed for ${fromNumber}:`, String(err));
   }
 
   return {
-    instructions: `${BASE_PROMPT}${greeting}${memorySection}${context}${curriculumSection}${rumiSection}`,
+    instructions: `${BASE_PROMPT}${greeting}${dateLine}${memorySection}${context}${curriculumSection}${rumiSection}`,
   };
 };

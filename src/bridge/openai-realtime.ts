@@ -40,9 +40,27 @@ export class OpenAIRealtimeSession {
   #toolNames = new Map<string, string>();
 
   constructor(
-    private readonly instructions: string,
+    private instructions: string,
     private readonly cb: RealtimeCallbacks,
   ) {}
+
+  /**
+   * Fold extra context into the live session (e.g. messages the caller sent to
+   * Rumi moments ago, fetched after connect). If the session is already
+   * configured we push a session.update; if not, mutating `instructions` here
+   * means configureSession will include it in the initial update. Either way it
+   * lands, and it never blocks the call.
+   */
+  appendInstructions(extra: string): void {
+    if (!extra.trim()) return;
+    this.instructions = `${this.instructions}\n\n${extra}`;
+    if (this.#ready) {
+      this.#send({
+        type: 'session.update',
+        session: { type: 'realtime', instructions: this.instructions },
+      });
+    }
+  }
 
   connect(): void {
     const url = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(
@@ -136,18 +154,27 @@ export class OpenAIRealtimeSession {
           type: 'function',
           name: 'search_rumi_history',
           description:
-            "Search this caller's past chats with the Rumi WhatsApp assistant for a specific topic or detail — " +
-            'including old conversations. Use when they ask about something specific you were told happened before ' +
-            "and it isn't already in your context. Returns matching past messages with dates.",
+            "Look up this caller's past chats with the Rumi WhatsApp assistant — their FULL history, including old " +
+            'conversations. Use for a specific topic (query), their first/earliest messages (order="oldest"), or a ' +
+            'specific day (on_date). Returns matching messages with dates. All arguments are optional.',
           parameters: {
             type: 'object',
             properties: {
               query: {
                 type: 'string',
-                description: 'A few keywords describing what to find in their past chats',
+                description: 'Keywords to search for in their past chats (optional)',
+              },
+              order: {
+                type: 'string',
+                enum: ['oldest', 'newest'],
+                description:
+                  "'oldest' to get their FIRST/earliest messages; 'newest' for most recent (default)",
+              },
+              on_date: {
+                type: 'string',
+                description: 'A specific day to fetch messages from, as YYYY-MM-DD (optional)',
               },
             },
-            required: ['query'],
           },
         },
       ];

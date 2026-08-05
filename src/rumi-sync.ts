@@ -137,17 +137,26 @@ async function syncProfiles(rumi: pg.Client): Promise<void> {
   console.log(`[rumi-sync] profiles upserted: ${res.rows.length}`);
 }
 
-/** Set accurate recency/volume on each profile from the synced messages. */
+/** Set accurate recency/volume + first-message on each profile from messages. */
 async function refreshMessageStats(): Promise<void> {
   const pool = getPool();
   if (!pool) return;
   await pool.query(`
     UPDATE rumi_profile p SET
       last_message_at = s.mx,
+      first_message_at = s.mn,
       message_count = s.n
-    FROM (SELECT phone_number, max(created_at) mx, count(*)::int n
+    FROM (SELECT phone_number, max(created_at) mx, min(created_at) mn, count(*)::int n
             FROM rumi_message GROUP BY phone_number) s
     WHERE p.phone_number = s.phone_number
+  `);
+  // The actual first thing they said (earliest non-empty message).
+  await pool.query(`
+    UPDATE rumi_profile p SET first_message_text = e.content
+    FROM (SELECT DISTINCT ON (phone_number) phone_number, content
+            FROM rumi_message WHERE content <> ''
+            ORDER BY phone_number, created_at ASC) e
+    WHERE p.phone_number = e.phone_number
   `);
 }
 
@@ -312,6 +321,83 @@ export async function runRumiSync(): Promise<void> {
       /* noop */
     }
     running = false;
+  }
+}
+
+// A small warm pool kept open for per-call delta fetches (so a call doesn't pay
+// a fresh TLS/connect each time). Lazy — created on first delta.
+let deltaPool: pg.Pool | null = null;
+const getDeltaPool = (): pg.Pool | null => {
+  if (!rumiEnabled()) return null;
+  if (!deltaPool) {
+    deltaPool = new pg.Pool({
+      host: config.rumi.host,
+      port: config.rumi.port,
+      user: config.rumi.user,
+      password: config.rumi.password,
+      database: config.rumi.database,
+      ssl: { rejectUnauthorized: false },
+      max: 2,
+      statement_timeout: 4000,
+      idleTimeoutMillis: 30_000,
+    });
+    deltaPool.on('error', () => undefined); // never crash on idle client errors
+  }
+  return deltaPool;
+};
+
+/**
+ * Pull just THIS caller's Rumi messages that are newer than what we already have
+ * locally, write them into Noor's local mirror, and return them. Used at connect
+ * (fire-and-forget) so a caller who just chatted with Rumi is fresh on the call.
+ *
+ * FAIL-OPEN and non-blocking: returns [] on any error/timeout, and only acts for
+ * callers we've already synced before (first-timers are handled by the batch
+ * sync). Never throws.
+ */
+export async function syncCallerDelta(
+  phone: string,
+): Promise<{ role: string; content: string; createdAt: Date }[]> {
+  const noor = getPool();
+  const rumi = getDeltaPool();
+  if (!noor || !rumi || !phone) return [];
+  try {
+    const wm = await noor.query(
+      `SELECT max(created_at) mx FROM rumi_message WHERE phone_number = $1`,
+      [phone],
+    );
+    const since: Date | null = wm.rows[0]?.mx ?? null;
+    if (!since) return []; // never synced this caller — leave it to the batch job
+    const res = await rumi.query(
+      `SELECT c.id, c.role, c.content, c.message_type, c.created_at
+         FROM conversations c JOIN users u ON u.id = c.user_id
+        WHERE u.phone_number = $1 AND c.created_at > $2
+        ORDER BY c.created_at ASC LIMIT 200`,
+      [phone, since],
+    );
+    if (res.rows.length === 0) return [];
+    for (const r of res.rows) {
+      await noor.query(
+        `INSERT INTO rumi_message (id, phone_number, role, content, message_type, created_at)
+         VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (id) DO UPDATE SET content = EXCLUDED.content`,
+        [r.id, phone, r.role, r.content, r.message_type, r.created_at],
+      );
+    }
+    await noor.query(
+      `UPDATE rumi_profile p SET last_message_at = s.mx, message_count = s.n
+         FROM (SELECT max(created_at) mx, count(*)::int n FROM rumi_message WHERE phone_number = $1) s
+        WHERE p.phone_number = $1`,
+      [phone],
+    );
+    console.log(`[rumi-delta] ${phone}: +${res.rows.length} new message(s)`);
+    return res.rows.map((r) => ({
+      role: r.role,
+      content: r.content,
+      createdAt: r.created_at,
+    }));
+  } catch (err) {
+    console.warn('[rumi-delta] failed (fail-open):', String(err).slice(0, 120));
+    return [];
   }
 }
 

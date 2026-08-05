@@ -9,6 +9,7 @@ import {
   normalizeSubject,
 } from '../curriculum.js';
 import { setUserMemoryGradeSubject, searchRumiHistory } from '../db.js';
+import { syncCallerDelta } from '../rumi-sync.js';
 import {
   downmixToMono,
   resampleLinear,
@@ -180,15 +181,25 @@ export class CallSession {
 
         if (name === 'search_rumi_history') {
           const query = String(args.query ?? '').trim();
-          if (!query) return 'No search terms given.';
-          // Local full-text search over this caller's synced Rumi messages —
-          // no network to Rumi prod, so it's fast on the live call path.
-          const hits = await searchRumiHistory(this.fromNumber, query, 8);
-          console.log(`${this.#tag} [rumi] search "${query}" -> ${hits.length} hits`);
+          const order = args.order === 'oldest' ? 'oldest' : 'newest';
+          const onDate = String(args.on_date ?? '').trim() || undefined;
+          // Local lookup over this caller's synced Rumi messages — no network to
+          // Rumi prod, so it's fast on the live call path.
+          const hits = await searchRumiHistory(this.fromNumber, {
+            query: query || undefined,
+            order,
+            onDate,
+            limit: 10,
+          });
+          console.log(
+            `${this.#tag} [rumi] search q="${query}" order=${order} on=${onDate ?? '-'} -> ${hits.length} hits`,
+          );
           if (hits.length === 0) {
-            return `No past Rumi messages found matching "${query}".`;
+            return 'No matching Rumi messages found for that.';
           }
-          return hits
+          // Present oldest→newest for readability regardless of fetch order.
+          const rows = order === 'oldest' ? hits : [...hits].reverse();
+          return rows
             .map((h) => {
               const date = new Date(h.createdAt).toISOString().slice(0, 10);
               const who = h.role === 'user' ? 'They' : 'Rumi';
@@ -206,6 +217,28 @@ export class CallSession {
       },
     });
     this.#realtime.connect();
+
+    // Fire-and-forget: pull anything this caller sent to Rumi since our last
+    // sync and fold it into the live session. Runs off the call path — the
+    // greeting never waits on it. The local mirror is updated regardless, so
+    // search_rumi_history is fresh even if this races the greeting.
+    void syncCallerDelta(this.fromNumber)
+      .then((newMsgs) => {
+        if (this.#closed || newMsgs.length === 0) return;
+        const lines = newMsgs
+          .map((m) => {
+            const d = new Date(m.createdAt).toISOString().slice(0, 10);
+            const who = m.role === 'user' ? 'They' : 'Rumi';
+            return `[${d}] ${who}: ${m.content.replace(/\s+/g, ' ').slice(0, 160)}`;
+          })
+          .join('\n');
+        this.#realtime?.appendInstructions(
+          `# Update — the caller ALSO just chatted with Rumi, newer than the history above:\n${lines}\n` +
+            `This is their MOST RECENT Rumi activity — treat it as the latest.`,
+        );
+        console.log(`${this.#tag} [rumi-delta] folded ${newMsgs.length} new msg(s) into session`);
+      })
+      .catch(() => undefined);
 
     // Incoming audio (caller -> Noor).
     pc.ontrack = (event: any) => {

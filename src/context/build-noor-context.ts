@@ -1,5 +1,5 @@
 import { fetchContextForCaller, type RawContextData } from './taleemabad-api.js';
-import { getUserMemory, getRumiProfile } from '../db.js';
+import { getUserMemory, getRumiProfile, getRecentRumiMessages } from '../db.js';
 import { getCurriculumSlice, curriculumStatus } from '../curriculum.js';
 
 /**
@@ -184,20 +184,38 @@ export const buildNoorContext = async (
       if (rumi.readingAssessmentsCount)
         stats.push(`Reading assessments: ${rumi.readingAssessmentsCount}`);
       if (rumi.quizzesCount) stats.push(`Quizzes: ${rumi.quizzesCount}`);
-      if (rumi.lastActivityAt)
-        stats.push(`Last active with Rumi: ${fmtDate(rumi.lastActivityAt)}`);
+      if (rumi.messageCount)
+        stats.push(`Total messages exchanged with Rumi: ${rumi.messageCount}`);
+      if (rumi.lastMessageAt)
+        stats.push(`Last talked to Rumi on: ${fmtDate(rumi.lastMessageAt)}`);
 
-      console.log(`[rumi] injected profile for ${fromNumber} (summary=${Boolean(rumi.summary)})`);
+      // Recent messages WITH dates, so Noor can answer "what did I last talk
+      // about" and date-specific questions directly (local read, no latency).
+      const recent = await getRecentRumiMessages(fromNumber, 6);
+      const recentBlock = recent.length
+        ? `\nMost recent messages with Rumi (newest first, with dates):\n` +
+          recent
+            .map((m) => {
+              const d = new Date(m.createdAt).toISOString().slice(0, 10);
+              const who = m.role === 'user' ? 'They' : 'Rumi';
+              return `[${d}] ${who}: ${m.content.replace(/\s+/g, ' ').slice(0, 140)}`;
+            })
+            .join('\n') +
+          '\n'
+        : '';
+
+      console.log(`[rumi] injected profile for ${fromNumber} (summary=${Boolean(rumi.summary)}, recent=${recent.length})`);
       rumiSection =
         `\n\n# This caller's history with Rumi (our WhatsApp assistant)\n` +
-        `This is the SAME person — they use Rumi on WhatsApp and are now calling you. Treat this as real, remembered context and use it naturally.\n` +
+        `This is the SAME person — they use Rumi on WhatsApp and are now calling you. Treat this as real, remembered context and use it naturally. Dates are real; use them when they ask "when" or "last".\n` +
         (stats.length ? `${stats.join('\n')}\n` : '') +
+        recentBlock +
         (rumi.summary?.trim()
           ? `\nWhat you've discussed with them before:\n${rumi.summary.trim()}\n`
           : '') +
-        `\nIf they ask about something SPECIFIC from a past chat that isn't covered above (even from long ago), ` +
+        `\nIf they ask about something SPECIFIC from a past chat that isn't in the recent messages or summary above (even from long ago), ` +
         `call the search_rumi_history tool with a few keywords to find it, then answer from what it returns. ` +
-        `Never claim you don't remember — either recall from above or search first.`;
+        `Never claim you don't remember — recall from above, or search first.`;
     }
   } catch (err) {
     console.warn(`[rumi] profile lookup failed for ${fromNumber}:`, String(err));

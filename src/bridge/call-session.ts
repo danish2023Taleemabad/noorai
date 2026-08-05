@@ -8,7 +8,7 @@ import {
   normalizeGrade,
   normalizeSubject,
 } from '../curriculum.js';
-import { setUserMemoryGradeSubject } from '../db.js';
+import { setUserMemoryGradeSubject, searchRumiHistory } from '../db.js';
 import {
   downmixToMono,
   resampleLinear,
@@ -158,24 +158,46 @@ export class CallSession {
         if (role === 'caller') this.#lastActivityAt = Date.now();
       },
       onToolCall: async (name, args) => {
-        if (name !== 'lookup_curriculum') return 'Unknown tool.';
-        const grade = String(args.grade ?? '');
-        const subject = String(args.subject ?? '');
-        const slice = getCurriculumSlice(grade, subject);
-        // Remember grade+subject so the next call injects it at connect (no tool
-        // call needed then). Fire-and-forget — never blocks the response.
-        const g = normalizeGrade(grade);
-        const s = normalizeSubject(subject);
-        if (g && s) {
-          void setUserMemoryGradeSubject(this.fromNumber, g, s).catch(
-            () => undefined,
-          );
+        if (name === 'lookup_curriculum') {
+          const grade = String(args.grade ?? '');
+          const subject = String(args.subject ?? '');
+          const slice = getCurriculumSlice(grade, subject);
+          // Remember grade+subject so the next call injects it at connect (no
+          // tool call needed then). Fire-and-forget — never blocks the response.
+          const g = normalizeGrade(grade);
+          const s = normalizeSubject(subject);
+          if (g && s) {
+            void setUserMemoryGradeSubject(this.fromNumber, g, s).catch(
+              () => undefined,
+            );
+          }
+          if (!slice) {
+            return `No curriculum found for grade "${grade}" subject "${subject}". Available: Grades 1-5, subjects English, Maths, and Urdu.`;
+          }
+          console.log(`${this.#tag} [curriculum] served Grade ${g} ${s}`);
+          return slice;
         }
-        if (!slice) {
-          return `No curriculum found for grade "${grade}" subject "${subject}". Available: Grades 1-5, subjects English, Maths, and Urdu.`;
+
+        if (name === 'search_rumi_history') {
+          const query = String(args.query ?? '').trim();
+          if (!query) return 'No search terms given.';
+          // Local full-text search over this caller's synced Rumi messages —
+          // no network to Rumi prod, so it's fast on the live call path.
+          const hits = await searchRumiHistory(this.fromNumber, query, 8);
+          console.log(`${this.#tag} [rumi] search "${query}" -> ${hits.length} hits`);
+          if (hits.length === 0) {
+            return `No past Rumi messages found matching "${query}".`;
+          }
+          return hits
+            .map((h) => {
+              const date = new Date(h.createdAt).toISOString().slice(0, 10);
+              const who = h.role === 'user' ? 'They' : 'Rumi';
+              return `[${date}] ${who}: ${h.content}`;
+            })
+            .join('\n');
         }
-        console.log(`${this.#tag} [curriculum] served Grade ${g} ${s}`);
-        return slice;
+
+        return 'Unknown tool.';
       },
       onError: (err) => console.warn(`${this.#tag} [realtime] error`, String(err)),
       onClose: () => {

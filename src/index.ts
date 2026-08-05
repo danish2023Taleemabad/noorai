@@ -7,6 +7,7 @@ import {
 } from './whatsapp/webhook.js';
 import { initDb } from './db.js';
 import { loadCurriculum } from './curriculum.js';
+import { startRumiSyncScheduler } from './rumi-sync.js';
 
 /**
  * Noor — WhatsApp voice agent server.
@@ -37,8 +38,9 @@ app.listen(config.port, () => {
   if (config.publicBaseUrl) {
     console.log(`  webhook: ${config.publicBaseUrl.replace(/\/+$/, '')}/webhook`);
   }
-  // Connect the call-log DB (no-op if DATABASE_URL isn't set).
-  void initDb();
+  // Connect the call-log DB (no-op if DATABASE_URL isn't set), THEN start the
+  // Rumi-history background sync (needs the DB tables to exist first).
+  void initDb().then(() => startRumiSyncScheduler());
   // Load the curriculum matrix into RAM once, off the call path (no-op if the
   // Google service account isn't configured). Never blocks calls.
   void loadCurriculum();

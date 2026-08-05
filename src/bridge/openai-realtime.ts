@@ -132,6 +132,24 @@ export class OpenAIRealtimeSession {
             required: ['grade', 'subject'],
           },
         },
+        {
+          type: 'function',
+          name: 'search_rumi_history',
+          description:
+            "Search this caller's past chats with the Rumi WhatsApp assistant for a specific topic or detail — " +
+            'including old conversations. Use when they ask about something specific you were told happened before ' +
+            "and it isn't already in your context. Returns matching past messages with dates.",
+          parameters: {
+            type: 'object',
+            properties: {
+              query: {
+                type: 'string',
+                description: 'A few keywords describing what to find in their past chats',
+              },
+            },
+            required: ['query'],
+          },
+        },
       ];
       session.tool_choice = 'auto';
     }

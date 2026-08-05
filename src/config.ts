@@ -71,6 +71,27 @@ export const config = {
     tabName: env('CURRICULUM_TAB', false, 'All Segments + SLOs'),
   },
 
+  // Read-only connection to the Rumi (WhatsApp chatbot) production DB. A
+  // background job syncs each caller's Rumi history into Noor's own DB, so the
+  // live call path only ever reads Noor's local copy (zero added latency).
+  // Enabled only when user + password are set.
+  rumi: {
+    host: env(
+      'RUMI_DB_HOST',
+      false,
+      'aws-1-ap-southeast-1.pooler.supabase.com',
+    ),
+    port: Number(env('RUMI_DB_PORT', false, '6543')),
+    user: env('RUMI_DB_USER'),
+    password: env('RUMI_DB_PASSWORD'),
+    database: env('RUMI_DB_NAME', false, 'postgres'),
+    // How often the background sync runs (minutes). First run ~30s after boot.
+    syncIntervalMinutes: Number(env('RUMI_SYNC_INTERVAL_MINUTES', false, '360')),
+    // Cap on how many callers get their conversation summary (re)generated per
+    // sync run, to bound summarizer cost. Most-recently-active first.
+    summaryCap: Number(env('RUMI_SUMMARY_CAP', false, '150')),
+  },
+
   // Optional TURN relay for hosts (e.g. Railway) that can't do WebRTC over raw
   // UDP. Leave empty to use STUN-only (works locally / on UDP-friendly hosts).
   // TURN over TCP/TLS (turns:...?transport=tcp) is what makes media traverse

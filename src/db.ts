@@ -55,6 +55,59 @@ export const initDb = async (): Promise<void> => {
   // existed, so ADD COLUMN IF NOT EXISTS keeps older DBs working).
   await pool.query(`ALTER TABLE user_memory ADD COLUMN IF NOT EXISTS grade TEXT;`);
   await pool.query(`ALTER TABLE user_memory ADD COLUMN IF NOT EXISTS subject TEXT;`);
+
+  // --- Rumi history (synced from the Rumi chatbot's prod DB) ---
+  // A per-caller profile (pre-aggregated stats + a bounded conversation summary),
+  // injected at connect; and a local mirror of their messages for the
+  // search_rumi_history tool (full-text searched LOCALLY on the call path).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS rumi_profile (
+      phone_number   TEXT PRIMARY KEY,
+      rumi_user_id   TEXT,
+      name           TEXT,
+      grades_taught  TEXT,
+      subjects_taught TEXT,
+      region         TEXT,
+      organization   TEXT,
+      preferred_language TEXT,
+      lesson_plans_count INTEGER,
+      lesson_plans_last_at TIMESTAMPTZ,
+      coaching_sessions_count INTEGER,
+      coaching_avg_percentage NUMERIC,
+      coaching_sessions_last_at TIMESTAMPTZ,
+      reading_assessments_count INTEGER,
+      quizzes_count  INTEGER,
+      videos_count   INTEGER,
+      last_activity_at TIMESTAMPTZ,
+      summary        TEXT,
+      summary_at     TIMESTAMPTZ,
+      synced_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS rumi_message (
+      id           TEXT PRIMARY KEY,
+      phone_number TEXT NOT NULL,
+      role         TEXT,
+      content      TEXT,
+      message_type TEXT,
+      created_at   TIMESTAMPTZ
+    );
+  `);
+  await pool.query(
+    `CREATE INDEX IF NOT EXISTS idx_rumi_msg_phone ON rumi_message (phone_number, created_at DESC);`,
+  );
+  await pool.query(
+    `CREATE INDEX IF NOT EXISTS idx_rumi_msg_fts ON rumi_message USING gin (to_tsvector('simple', content));`,
+  );
+  // Small key/value store for sync watermarks.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS sync_state (
+      key        TEXT PRIMARY KEY,
+      value      TEXT,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+  `);
   console.log('[db] connected — call logging + memory enabled');
 };
 
@@ -183,5 +236,105 @@ export const logCallEnd = async (row: {
     );
   } catch (err) {
     console.warn('[db] logCallEnd failed:', String(err));
+  }
+};
+
+// ---------------------------------------------------------------------------
+// Rumi history (synced from the Rumi chatbot's prod DB)
+// ---------------------------------------------------------------------------
+
+/** The live pool (or null if DB disabled) — used by the Rumi sync job. */
+export const getPool = (): pg.Pool | null => pool;
+
+export interface RumiProfile {
+  name: string | null;
+  gradesTaught: string | null;
+  subjectsTaught: string | null;
+  region: string | null;
+  organization: string | null;
+  preferredLanguage: string | null;
+  lessonPlansCount: number | null;
+  lessonPlansLastAt: Date | null;
+  coachingSessionsCount: number | null;
+  coachingAvgPercentage: number | null;
+  coachingSessionsLastAt: Date | null;
+  readingAssessmentsCount: number | null;
+  quizzesCount: number | null;
+  videosCount: number | null;
+  lastActivityAt: Date | null;
+  summary: string | null;
+}
+
+/** The caller's synced Rumi profile, or null if none/DB off. Local read. */
+export const getRumiProfile = async (
+  phoneNumber: string,
+): Promise<RumiProfile | null> => {
+  if (!pool || !phoneNumber) return null;
+  try {
+    const res = await pool.query(
+      `SELECT name, grades_taught, subjects_taught, region, organization,
+              preferred_language, lesson_plans_count, lesson_plans_last_at,
+              coaching_sessions_count, coaching_avg_percentage,
+              coaching_sessions_last_at, reading_assessments_count,
+              quizzes_count, videos_count, last_activity_at, summary
+         FROM rumi_profile WHERE phone_number = $1`,
+      [phoneNumber],
+    );
+    if (res.rows.length === 0) return null;
+    const r = res.rows[0];
+    return {
+      name: r.name,
+      gradesTaught: r.grades_taught,
+      subjectsTaught: r.subjects_taught,
+      region: r.region,
+      organization: r.organization,
+      preferredLanguage: r.preferred_language,
+      lessonPlansCount: r.lesson_plans_count,
+      lessonPlansLastAt: r.lesson_plans_last_at,
+      coachingSessionsCount: r.coaching_sessions_count,
+      coachingAvgPercentage:
+        r.coaching_avg_percentage != null ? Number(r.coaching_avg_percentage) : null,
+      coachingSessionsLastAt: r.coaching_sessions_last_at,
+      readingAssessmentsCount: r.reading_assessments_count,
+      quizzesCount: r.quizzes_count,
+      videosCount: r.videos_count,
+      lastActivityAt: r.last_activity_at,
+      summary: r.summary,
+    };
+  } catch (err) {
+    console.warn('[db] getRumiProfile failed:', String(err));
+    return null;
+  }
+};
+
+/**
+ * Full-text search the caller's synced Rumi messages (LOCAL — safe on the call
+ * path). Returns the most relevant/recent matching messages.
+ */
+export const searchRumiHistory = async (
+  phoneNumber: string,
+  query: string,
+  limit = 8,
+): Promise<{ role: string; content: string; createdAt: Date }[]> => {
+  if (!pool || !phoneNumber || !query.trim()) return [];
+  try {
+    const res = await pool.query(
+      `SELECT role, content, created_at
+         FROM rumi_message
+        WHERE phone_number = $1
+          AND (to_tsvector('simple', content) @@ plainto_tsquery('simple', $2)
+               OR content ILIKE '%' || $2 || '%')
+        ORDER BY created_at DESC
+        LIMIT $3`,
+      [phoneNumber, query.trim(), limit],
+    );
+    return res.rows.map((r) => ({
+      role: r.role,
+      content: r.content,
+      createdAt: r.created_at,
+    }));
+  } catch (err) {
+    console.warn('[db] searchRumiHistory failed:', String(err));
+    return [];
   }
 };

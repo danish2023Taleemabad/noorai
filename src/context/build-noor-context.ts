@@ -1,5 +1,5 @@
 import { fetchContextForCaller, type RawContextData } from './taleemabad-api.js';
-import { getUserMemory } from '../db.js';
+import { getUserMemory, getRumiProfile } from '../db.js';
 import { getCurriculumSlice, curriculumStatus } from '../curriculum.js';
 
 /**
@@ -156,7 +156,54 @@ export const buildNoorContext = async (
     }
   }
 
+  // Rumi history: the caller's past interactions with the Rumi chatbot, synced
+  // into Noor's own DB. The profile + summary are injected here (zero latency);
+  // for a SPECIFIC old detail, Noor uses the search_rumi_history tool (a local
+  // full-text search — also no live network).
+  let rumiSection = '';
+  try {
+    const rumi = await getRumiProfile(fromNumber);
+    if (rumi) {
+      const fmtDate = (d: Date | null): string =>
+        d ? new Date(d).toISOString().slice(0, 10) : '—';
+      const stats: string[] = [];
+      if (rumi.gradesTaught) stats.push(`Teaches grade(s): ${rumi.gradesTaught}`);
+      if (rumi.subjectsTaught) stats.push(`Subject(s): ${rumi.subjectsTaught}`);
+      if (rumi.region || rumi.organization)
+        stats.push(`Region/org: ${[rumi.region, rumi.organization].filter(Boolean).join(' / ')}`);
+      if (rumi.lessonPlansCount)
+        stats.push(`Lesson plans made with Rumi: ${rumi.lessonPlansCount} (last ${fmtDate(rumi.lessonPlansLastAt)})`);
+      if (rumi.coachingSessionsCount)
+        stats.push(
+          `Coaching sessions: ${rumi.coachingSessionsCount}` +
+            (rumi.coachingAvgPercentage != null
+              ? `, avg score ${Math.round(rumi.coachingAvgPercentage)}%`
+              : '') +
+            ` (last ${fmtDate(rumi.coachingSessionsLastAt)})`,
+        );
+      if (rumi.readingAssessmentsCount)
+        stats.push(`Reading assessments: ${rumi.readingAssessmentsCount}`);
+      if (rumi.quizzesCount) stats.push(`Quizzes: ${rumi.quizzesCount}`);
+      if (rumi.lastActivityAt)
+        stats.push(`Last active with Rumi: ${fmtDate(rumi.lastActivityAt)}`);
+
+      console.log(`[rumi] injected profile for ${fromNumber} (summary=${Boolean(rumi.summary)})`);
+      rumiSection =
+        `\n\n# This caller's history with Rumi (our WhatsApp assistant)\n` +
+        `This is the SAME person — they use Rumi on WhatsApp and are now calling you. Treat this as real, remembered context and use it naturally.\n` +
+        (stats.length ? `${stats.join('\n')}\n` : '') +
+        (rumi.summary?.trim()
+          ? `\nWhat you've discussed with them before:\n${rumi.summary.trim()}\n`
+          : '') +
+        `\nIf they ask about something SPECIFIC from a past chat that isn't covered above (even from long ago), ` +
+        `call the search_rumi_history tool with a few keywords to find it, then answer from what it returns. ` +
+        `Never claim you don't remember — either recall from above or search first.`;
+    }
+  } catch (err) {
+    console.warn(`[rumi] profile lookup failed for ${fromNumber}:`, String(err));
+  }
+
   return {
-    instructions: `${BASE_PROMPT}${greeting}${memorySection}${context}${curriculumSection}`,
+    instructions: `${BASE_PROMPT}${greeting}${memorySection}${context}${curriculumSection}${rumiSection}`,
   };
 };

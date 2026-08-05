@@ -90,6 +90,8 @@ export const initDb = async (): Promise<void> => {
   // synced messages (Rumi's users.* pre-agg columns are stale).
   await pool.query(`ALTER TABLE rumi_profile ADD COLUMN IF NOT EXISTS last_message_at TIMESTAMPTZ;`);
   await pool.query(`ALTER TABLE rumi_profile ADD COLUMN IF NOT EXISTS message_count INTEGER;`);
+  await pool.query(`ALTER TABLE rumi_profile ADD COLUMN IF NOT EXISTS first_message_at TIMESTAMPTZ;`);
+  await pool.query(`ALTER TABLE rumi_profile ADD COLUMN IF NOT EXISTS first_message_text TEXT;`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS rumi_message (
       id           TEXT PRIMARY KEY,
@@ -270,6 +272,8 @@ export interface RumiProfile {
   lastActivityAt: Date | null;
   lastMessageAt: Date | null;
   messageCount: number | null;
+  firstMessageAt: Date | null;
+  firstMessageText: string | null;
   summary: string | null;
 }
 
@@ -285,7 +289,8 @@ export const getRumiProfile = async (
               coaching_sessions_count, coaching_avg_percentage,
               coaching_sessions_last_at, reading_assessments_count,
               quizzes_count, videos_count, last_activity_at,
-              last_message_at, message_count, summary
+              last_message_at, message_count, first_message_at,
+              first_message_text, summary
          FROM rumi_profile WHERE phone_number = $1`,
       [phoneNumber],
     );
@@ -310,6 +315,8 @@ export const getRumiProfile = async (
       lastActivityAt: r.last_activity_at,
       lastMessageAt: r.last_message_at,
       messageCount: r.message_count,
+      firstMessageAt: r.first_message_at,
+      firstMessageText: r.first_message_text,
       summary: r.summary,
     };
   } catch (err) {
@@ -346,25 +353,47 @@ export const getRecentRumiMessages = async (
 };
 
 /**
- * Full-text search the caller's synced Rumi messages (LOCAL — safe on the call
- * path). Returns the most relevant/recent matching messages.
+ * Look up the caller's synced Rumi messages (LOCAL — safe on the call path).
+ * Flexible so Noor can handle temporal questions, not just keywords:
+ *   - `query`   → keyword/full-text match (optional)
+ *   - `onDate`  → messages on a specific day, YYYY-MM-DD (optional)
+ *   - `order`   → 'oldest' (their FIRST/earliest messages) or 'newest' (default)
  */
 export const searchRumiHistory = async (
   phoneNumber: string,
-  query: string,
-  limit = 8,
+  opts: {
+    query?: string;
+    onDate?: string;
+    order?: 'oldest' | 'newest';
+    limit?: number;
+  } = {},
 ): Promise<{ role: string; content: string; createdAt: Date }[]> => {
-  if (!pool || !phoneNumber || !query.trim()) return [];
+  if (!pool || !phoneNumber) return [];
+  const limit = opts.limit ?? 10;
+  const params: unknown[] = [phoneNumber];
+  const where = [`phone_number = $1`, `content <> ''`];
+  if (opts.query && opts.query.trim()) {
+    params.push(opts.query.trim());
+    const p = `$${params.length}`;
+    where.push(
+      `(to_tsvector('simple', content) @@ plainto_tsquery('simple', ${p}) OR content ILIKE '%' || ${p} || '%')`,
+    );
+  }
+  if (opts.onDate && /^\d{4}-\d{2}-\d{2}$/.test(opts.onDate)) {
+    params.push(opts.onDate);
+    where.push(
+      `created_at >= $${params.length}::date AND created_at < ($${params.length}::date + interval '1 day')`,
+    );
+  }
+  const dir = opts.order === 'oldest' ? 'ASC' : 'DESC';
+  params.push(limit);
   try {
     const res = await pool.query(
-      `SELECT role, content, created_at
-         FROM rumi_message
-        WHERE phone_number = $1
-          AND (to_tsvector('simple', content) @@ plainto_tsquery('simple', $2)
-               OR content ILIKE '%' || $2 || '%')
-        ORDER BY created_at DESC
-        LIMIT $3`,
-      [phoneNumber, query.trim(), limit],
+      `SELECT role, content, created_at FROM rumi_message
+        WHERE ${where.join(' AND ')}
+        ORDER BY created_at ${dir}
+        LIMIT $${params.length}`,
+      params,
     );
     return res.rows.map((r) => ({
       role: r.role,

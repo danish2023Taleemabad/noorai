@@ -180,15 +180,25 @@ export class CallSession {
 
         if (name === 'search_rumi_history') {
           const query = String(args.query ?? '').trim();
-          if (!query) return 'No search terms given.';
-          // Local full-text search over this caller's synced Rumi messages —
-          // no network to Rumi prod, so it's fast on the live call path.
-          const hits = await searchRumiHistory(this.fromNumber, query, 8);
-          console.log(`${this.#tag} [rumi] search "${query}" -> ${hits.length} hits`);
+          const order = args.order === 'oldest' ? 'oldest' : 'newest';
+          const onDate = String(args.on_date ?? '').trim() || undefined;
+          // Local lookup over this caller's synced Rumi messages — no network to
+          // Rumi prod, so it's fast on the live call path.
+          const hits = await searchRumiHistory(this.fromNumber, {
+            query: query || undefined,
+            order,
+            onDate,
+            limit: 10,
+          });
+          console.log(
+            `${this.#tag} [rumi] search q="${query}" order=${order} on=${onDate ?? '-'} -> ${hits.length} hits`,
+          );
           if (hits.length === 0) {
-            return `No past Rumi messages found matching "${query}".`;
+            return 'No matching Rumi messages found for that.';
           }
-          return hits
+          // Present oldest→newest for readability regardless of fetch order.
+          const rows = order === 'oldest' ? hits : [...hits].reverse();
+          return rows
             .map((h) => {
               const date = new Date(h.createdAt).toISOString().slice(0, 10);
               const who = h.role === 'user' ? 'They' : 'Rumi';

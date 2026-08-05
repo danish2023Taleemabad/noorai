@@ -186,6 +186,12 @@ export const buildNoorContext = async (
       if (rumi.quizzesCount) stats.push(`Quizzes: ${rumi.quizzesCount}`);
       if (rumi.messageCount)
         stats.push(`Total messages exchanged with Rumi: ${rumi.messageCount}`);
+      if (rumi.firstMessageAt) {
+        const firstMsg = rumi.firstMessageText
+          ? ` (their first message: "${rumi.firstMessageText.replace(/\s+/g, ' ').slice(0, 120)}")`
+          : '';
+        stats.push(`First started talking to Rumi on: ${fmtDate(rumi.firstMessageAt)}${firstMsg}`);
+      }
       if (rumi.lastMessageAt)
         stats.push(`Last talked to Rumi on: ${fmtDate(rumi.lastMessageAt)}`);
 
@@ -213,9 +219,11 @@ export const buildNoorContext = async (
         (rumi.summary?.trim()
           ? `\nWhat you've discussed with them before:\n${rumi.summary.trim()}\n`
           : '') +
-        `\nIf they ask about something SPECIFIC from a past chat that isn't in the recent messages or summary above (even from long ago), ` +
-        `call the search_rumi_history tool with a few keywords to find it, then answer from what it returns. ` +
-        `Never claim you don't remember — recall from above, or search first.`;
+        `\nFor anything not already shown above, use the search_rumi_history tool — it can look up their whole Rumi history:\n` +
+        `- a specific topic → pass keywords in "query"\n` +
+        `- their FIRST/earliest messages ("what did I first ask", "when did I start") → pass order="oldest"\n` +
+        `- a specific day → pass on_date="YYYY-MM-DD"\n` +
+        `Then answer from what it returns. You have their FULL history — NEVER say you don't have the data; if unsure, search first.`;
     }
   } catch (err) {
     console.warn(`[rumi] profile lookup failed for ${fromNumber}:`, String(err));

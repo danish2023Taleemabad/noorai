@@ -137,17 +137,26 @@ async function syncProfiles(rumi: pg.Client): Promise<void> {
   console.log(`[rumi-sync] profiles upserted: ${res.rows.length}`);
 }
 
-/** Set accurate recency/volume on each profile from the synced messages. */
+/** Set accurate recency/volume + first-message on each profile from messages. */
 async function refreshMessageStats(): Promise<void> {
   const pool = getPool();
   if (!pool) return;
   await pool.query(`
     UPDATE rumi_profile p SET
       last_message_at = s.mx,
+      first_message_at = s.mn,
       message_count = s.n
-    FROM (SELECT phone_number, max(created_at) mx, count(*)::int n
+    FROM (SELECT phone_number, max(created_at) mx, min(created_at) mn, count(*)::int n
             FROM rumi_message GROUP BY phone_number) s
     WHERE p.phone_number = s.phone_number
+  `);
+  // The actual first thing they said (earliest non-empty message).
+  await pool.query(`
+    UPDATE rumi_profile p SET first_message_text = e.content
+    FROM (SELECT DISTINCT ON (phone_number) phone_number, content
+            FROM rumi_message WHERE content <> ''
+            ORDER BY phone_number, created_at ASC) e
+    WHERE p.phone_number = e.phone_number
   `);
 }
 

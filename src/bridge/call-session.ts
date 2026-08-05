@@ -9,6 +9,7 @@ import {
   normalizeSubject,
 } from '../curriculum.js';
 import { setUserMemoryGradeSubject, searchRumiHistory } from '../db.js';
+import { syncCallerDelta } from '../rumi-sync.js';
 import {
   downmixToMono,
   resampleLinear,
@@ -216,6 +217,28 @@ export class CallSession {
       },
     });
     this.#realtime.connect();
+
+    // Fire-and-forget: pull anything this caller sent to Rumi since our last
+    // sync and fold it into the live session. Runs off the call path — the
+    // greeting never waits on it. The local mirror is updated regardless, so
+    // search_rumi_history is fresh even if this races the greeting.
+    void syncCallerDelta(this.fromNumber)
+      .then((newMsgs) => {
+        if (this.#closed || newMsgs.length === 0) return;
+        const lines = newMsgs
+          .map((m) => {
+            const d = new Date(m.createdAt).toISOString().slice(0, 10);
+            const who = m.role === 'user' ? 'They' : 'Rumi';
+            return `[${d}] ${who}: ${m.content.replace(/\s+/g, ' ').slice(0, 160)}`;
+          })
+          .join('\n');
+        this.#realtime?.appendInstructions(
+          `# Update — the caller ALSO just chatted with Rumi, newer than the history above:\n${lines}\n` +
+            `This is their MOST RECENT Rumi activity — treat it as the latest.`,
+        );
+        console.log(`${this.#tag} [rumi-delta] folded ${newMsgs.length} new msg(s) into session`);
+      })
+      .catch(() => undefined);
 
     // Incoming audio (caller -> Noor).
     pc.ontrack = (event: any) => {

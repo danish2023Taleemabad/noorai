@@ -40,9 +40,27 @@ export class OpenAIRealtimeSession {
   #toolNames = new Map<string, string>();
 
   constructor(
-    private readonly instructions: string,
+    private instructions: string,
     private readonly cb: RealtimeCallbacks,
   ) {}
+
+  /**
+   * Fold extra context into the live session (e.g. messages the caller sent to
+   * Rumi moments ago, fetched after connect). If the session is already
+   * configured we push a session.update; if not, mutating `instructions` here
+   * means configureSession will include it in the initial update. Either way it
+   * lands, and it never blocks the call.
+   */
+  appendInstructions(extra: string): void {
+    if (!extra.trim()) return;
+    this.instructions = `${this.instructions}\n\n${extra}`;
+    if (this.#ready) {
+      this.#send({
+        type: 'session.update',
+        session: { type: 'realtime', instructions: this.instructions },
+      });
+    }
+  }
 
   connect(): void {
     const url = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(

@@ -79,11 +79,17 @@ export const initDb = async (): Promise<void> => {
       quizzes_count  INTEGER,
       videos_count   INTEGER,
       last_activity_at TIMESTAMPTZ,
+      last_message_at TIMESTAMPTZ,
+      message_count  INTEGER,
       summary        TEXT,
       summary_at     TIMESTAMPTZ,
       synced_at      TIMESTAMPTZ NOT NULL DEFAULT now()
     );
   `);
+  // Added after the table shipped — accurate recency/volume derived from the
+  // synced messages (Rumi's users.* pre-agg columns are stale).
+  await pool.query(`ALTER TABLE rumi_profile ADD COLUMN IF NOT EXISTS last_message_at TIMESTAMPTZ;`);
+  await pool.query(`ALTER TABLE rumi_profile ADD COLUMN IF NOT EXISTS message_count INTEGER;`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS rumi_message (
       id           TEXT PRIMARY KEY,
@@ -262,6 +268,8 @@ export interface RumiProfile {
   quizzesCount: number | null;
   videosCount: number | null;
   lastActivityAt: Date | null;
+  lastMessageAt: Date | null;
+  messageCount: number | null;
   summary: string | null;
 }
 
@@ -276,7 +284,8 @@ export const getRumiProfile = async (
               preferred_language, lesson_plans_count, lesson_plans_last_at,
               coaching_sessions_count, coaching_avg_percentage,
               coaching_sessions_last_at, reading_assessments_count,
-              quizzes_count, videos_count, last_activity_at, summary
+              quizzes_count, videos_count, last_activity_at,
+              last_message_at, message_count, summary
          FROM rumi_profile WHERE phone_number = $1`,
       [phoneNumber],
     );
@@ -299,11 +308,40 @@ export const getRumiProfile = async (
       quizzesCount: r.quizzes_count,
       videosCount: r.videos_count,
       lastActivityAt: r.last_activity_at,
+      lastMessageAt: r.last_message_at,
+      messageCount: r.message_count,
       summary: r.summary,
     };
   } catch (err) {
     console.warn('[db] getRumiProfile failed:', String(err));
     return null;
+  }
+};
+
+/**
+ * The caller's most recent Rumi messages (newest first), for the "what did we
+ * last talk about" case. Local read — safe on the call path.
+ */
+export const getRecentRumiMessages = async (
+  phoneNumber: string,
+  limit = 6,
+): Promise<{ role: string; content: string; createdAt: Date }[]> => {
+  if (!pool || !phoneNumber) return [];
+  try {
+    const res = await pool.query(
+      `SELECT role, content, created_at FROM rumi_message
+        WHERE phone_number = $1 AND content <> ''
+        ORDER BY created_at DESC LIMIT $2`,
+      [phoneNumber, limit],
+    );
+    return res.rows.map((r) => ({
+      role: r.role,
+      content: r.content,
+      createdAt: r.created_at,
+    }));
+  } catch (err) {
+    console.warn('[db] getRecentRumiMessages failed:', String(err));
+    return [];
   }
 };
 

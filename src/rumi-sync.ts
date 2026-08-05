@@ -68,26 +68,55 @@ const setState = async (key: string, value: string): Promise<void> => {
 
 // ---- profile sync (full pull each run — the users table is small) ----
 
+/** count + last date per user_id from a child table (users.* counts are stale). */
+async function aggByUser(
+  rumi: pg.Client,
+  table: string,
+): Promise<Map<string, { n: number; last: Date | null }>> {
+  const m = new Map<string, { n: number; last: Date | null }>();
+  try {
+    const r = await rumi.query(
+      `SELECT user_id, count(*)::int n, max(created_at) last FROM ${table} GROUP BY user_id`,
+    );
+    for (const row of r.rows) m.set(row.user_id, { n: row.n, last: row.last });
+  } catch (err) {
+    console.warn(`[rumi-sync] agg ${table} skipped:`, String(err).slice(0, 100));
+  }
+  return m;
+}
+
 async function syncProfiles(rumi: pg.Client): Promise<void> {
   const pool = getPool();
   if (!pool) return;
+
+  // Real activity counts/dates, computed fresh (Rumi's users.* pre-aggregated
+  // columns are frozen at signup — verified stale).
+  const [lp, coaching, reading, quiz] = await Promise.all([
+    aggByUser(rumi, 'lesson_plans'),
+    aggByUser(rumi, 'coaching_sessions'),
+    aggByUser(rumi, 'reading_assessments'),
+    aggByUser(rumi, 'quiz_sessions'),
+  ]);
+
   const res = await rumi.query(`
     SELECT id, phone_number, COALESCE(name, first_name) AS name, grades_taught,
-           subjects_taught, region, organization, preferred_language,
-           lesson_plans_count, lesson_plans_last_at, coaching_sessions_count,
-           coaching_avg_percentage, coaching_sessions_last_at,
-           reading_assessments_count, quizzes_count, videos_count, last_activity_at
+           subjects_taught, region, organization, preferred_language
       FROM users
      WHERE phone_number IS NOT NULL AND COALESCE(is_test_user, false) = false
   `);
+  const z = { n: 0, last: null as Date | null };
   for (const u of res.rows) {
+    const a = lp.get(u.id) ?? z;
+    const co = coaching.get(u.id) ?? z;
+    const rd = reading.get(u.id) ?? z;
+    const qz = quiz.get(u.id) ?? z;
     await pool.query(
       `INSERT INTO rumi_profile (
          phone_number, rumi_user_id, name, grades_taught, subjects_taught, region,
          organization, preferred_language, lesson_plans_count, lesson_plans_last_at,
-         coaching_sessions_count, coaching_avg_percentage, coaching_sessions_last_at,
-         reading_assessments_count, quizzes_count, videos_count, last_activity_at, synced_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, now())
+         coaching_sessions_count, coaching_sessions_last_at,
+         reading_assessments_count, quizzes_count, synced_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, now())
        ON CONFLICT (phone_number) DO UPDATE SET
          rumi_user_id = EXCLUDED.rumi_user_id, name = EXCLUDED.name,
          grades_taught = EXCLUDED.grades_taught, subjects_taught = EXCLUDED.subjects_taught,
@@ -96,21 +125,31 @@ async function syncProfiles(rumi: pg.Client): Promise<void> {
          lesson_plans_count = EXCLUDED.lesson_plans_count,
          lesson_plans_last_at = EXCLUDED.lesson_plans_last_at,
          coaching_sessions_count = EXCLUDED.coaching_sessions_count,
-         coaching_avg_percentage = EXCLUDED.coaching_avg_percentage,
          coaching_sessions_last_at = EXCLUDED.coaching_sessions_last_at,
          reading_assessments_count = EXCLUDED.reading_assessments_count,
-         quizzes_count = EXCLUDED.quizzes_count, videos_count = EXCLUDED.videos_count,
-         last_activity_at = EXCLUDED.last_activity_at, synced_at = now()`,
+         quizzes_count = EXCLUDED.quizzes_count, synced_at = now()`,
       [
         u.phone_number, u.id, u.name, flattenJson(u.grades_taught),
         flattenJson(u.subjects_taught), u.region, u.organization, u.preferred_language,
-        u.lesson_plans_count, u.lesson_plans_last_at, u.coaching_sessions_count,
-        u.coaching_avg_percentage, u.coaching_sessions_last_at,
-        u.reading_assessments_count, u.quizzes_count, u.videos_count, u.last_activity_at,
+        a.n, a.last, co.n, co.last, rd.n, qz.n,
       ],
     );
   }
   console.log(`[rumi-sync] profiles upserted: ${res.rows.length}`);
+}
+
+/** Set accurate recency/volume on each profile from the synced messages. */
+async function refreshMessageStats(): Promise<void> {
+  const pool = getPool();
+  if (!pool) return;
+  await pool.query(`
+    UPDATE rumi_profile p SET
+      last_message_at = s.mx,
+      message_count = s.n
+    FROM (SELECT phone_number, max(created_at) mx, count(*)::int n
+            FROM rumi_message GROUP BY phone_number) s
+    WHERE p.phone_number = s.phone_number
+  `);
 }
 
 // ---- message sync (incremental, keyset paginated by (created_at, id)) ----
@@ -169,11 +208,13 @@ async function syncMessages(rumi: pg.Client): Promise<void> {
 async function summarizeProfiles(): Promise<void> {
   const pool = getPool();
   if (!pool) return;
-  // Callers whose summary is missing or stale (older than their latest activity).
+  // Callers whose summary is missing or stale — prioritised by REAL recency
+  // (last_message_at from synced messages; users.last_activity_at is stale).
   const due = await pool.query(
     `SELECT phone_number FROM rumi_profile
-      WHERE (summary IS NULL OR summary_at IS NULL OR summary_at < last_activity_at)
-      ORDER BY last_activity_at DESC NULLS LAST
+      WHERE last_message_at IS NOT NULL
+        AND (summary IS NULL OR summary_at IS NULL OR summary_at < last_message_at)
+      ORDER BY last_message_at DESC NULLS LAST
       LIMIT $1`,
     [config.rumi.summaryCap],
   );
@@ -260,6 +301,7 @@ export async function runRumiSync(): Promise<void> {
     await rumi.connect();
     await syncProfiles(rumi);
     await syncMessages(rumi);
+    await refreshMessageStats();
     await summarizeProfiles();
     console.log(`[rumi-sync] done in ${Math.round((Date.now() - startedAt) / 1000)}s`);
   } catch (err) {

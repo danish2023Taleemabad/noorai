@@ -90,13 +90,12 @@ async function syncProfiles(rumi: pg.Client): Promise<void> {
   if (!pool) return;
 
   // Real activity counts/dates, computed fresh (Rumi's users.* pre-aggregated
-  // columns are frozen at signup — verified stale).
-  const [lp, coaching, reading, quiz] = await Promise.all([
-    aggByUser(rumi, 'lesson_plans'),
-    aggByUser(rumi, 'coaching_sessions'),
-    aggByUser(rumi, 'reading_assessments'),
-    aggByUser(rumi, 'quiz_sessions'),
-  ]);
+  // columns are frozen at signup — verified stale). Sequential, not Promise.all:
+  // a single pg.Client can only run one query at a time.
+  const lp = await aggByUser(rumi, 'lesson_plans');
+  const coaching = await aggByUser(rumi, 'coaching_sessions');
+  const reading = await aggByUser(rumi, 'reading_assessments');
+  const quiz = await aggByUser(rumi, 'quiz_sessions');
 
   const res = await rumi.query(`
     SELECT id, phone_number, COALESCE(name, first_name) AS name, grades_taught,

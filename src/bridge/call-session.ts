@@ -8,7 +8,11 @@ import {
   normalizeGrade,
   normalizeSubject,
 } from '../curriculum.js';
-import { setUserMemoryGradeSubject, searchRumiHistory } from '../db.js';
+import {
+  setUserMemoryGradeSubject,
+  searchRumiHistory,
+  logResponseLatency,
+} from '../db.js';
 import { syncCallerDelta } from '../rumi-sync.js';
 import {
   downmixToMono,
@@ -157,6 +161,15 @@ export class CallSession {
         this.#transcript.push({ role, text: clean });
         // Real caller speech counts as activity (resets the silence timer).
         if (role === 'caller') this.#lastActivityAt = Date.now();
+      },
+      onResponseLatency: (ms) => {
+        // Quantitative responsiveness metric — logged off the audio path.
+        console.log(`${this.#tag} [latency] response ${ms}ms`);
+        void logResponseLatency({
+          waCallId: this.callId,
+          callerNumber: this.fromNumber,
+          latencyMs: ms,
+        }).catch(() => undefined);
       },
       onToolCall: async (name, args) => {
         if (name === 'lookup_curriculum') {

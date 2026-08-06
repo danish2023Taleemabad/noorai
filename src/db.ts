@@ -116,6 +116,19 @@ export const initDb = async (): Promise<void> => {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
   `);
+  // Per-response latency measurements (caller stops speaking -> Noor's first
+  // audio), one row per response, for responsiveness analytics in Metabase.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS response_latency (
+      id            BIGSERIAL PRIMARY KEY,
+      wa_call_id    TEXT,
+      caller_number TEXT,
+      latency_ms    INTEGER NOT NULL,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_latency_created ON response_latency (created_at);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_latency_call ON response_latency (wa_call_id);`);
   console.log('[db] connected — call logging + memory enabled');
 };
 
@@ -244,6 +257,27 @@ export const logCallEnd = async (row: {
     );
   } catch (err) {
     console.warn('[db] logCallEnd failed:', String(err));
+  }
+};
+
+/**
+ * Record one response-latency measurement (ms from the caller's end-of-turn to
+ * Noor's first audio). Fire-and-forget; no-op if DB disabled. Never blocks.
+ */
+export const logResponseLatency = async (row: {
+  waCallId: string;
+  callerNumber?: string;
+  latencyMs: number;
+}): Promise<void> => {
+  if (!pool) return;
+  try {
+    await pool.query(
+      `INSERT INTO response_latency (wa_call_id, caller_number, latency_ms)
+       VALUES ($1, $2, $3)`,
+      [row.waCallId, row.callerNumber ?? null, Math.round(row.latencyMs)],
+    );
+  } catch (err) {
+    console.warn('[db] logResponseLatency failed:', String(err));
   }
 };
 

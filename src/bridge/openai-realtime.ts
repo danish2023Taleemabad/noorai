@@ -23,6 +23,11 @@ export interface RealtimeCallbacks {
   /** Called with each finalized transcript line (caller or Noor). */
   onTranscript?: (role: 'caller' | 'noor', text: string) => void;
   /**
+   * Called once per response with Noor's response latency in ms — the time from
+   * the caller finishing their turn (speech_stopped) to Noor's first audio.
+   */
+  onResponseLatency?: (ms: number) => void;
+  /**
    * Called when the model invokes a function tool. Returns the tool's output
    * text (fed back to the model). If provided, the lookup_curriculum tool is
    * registered on the session.
@@ -38,6 +43,9 @@ export class OpenAIRealtimeSession {
   // Maps a function-call id -> tool name (name arrives on output_item.added,
   // arguments arrive later on the .done event).
   #toolNames = new Map<string, string>();
+  // When the caller last stopped speaking — used to measure response latency
+  // (cleared once the first audio of the reply goes out, so we log once/turn).
+  #speechStoppedAt: number | null = null;
 
   constructor(
     private instructions: string,
@@ -224,9 +232,17 @@ export class OpenAIRealtimeSession {
         break;
       case 'input_audio_buffer.speech_stopped':
         console.log('[realtime] speech_stopped (turn end)');
+        // Start the response-latency clock for this turn.
+        this.#speechStoppedAt = Date.now();
         break;
       case 'response.output_audio.delta':
       case 'response.audio.delta': // older event name — support both
+        // First audio of a reply to a caller turn → record response latency.
+        if (this.#speechStoppedAt != null) {
+          const ms = Date.now() - this.#speechStoppedAt;
+          this.#speechStoppedAt = null;
+          this.cb.onResponseLatency?.(ms);
+        }
         if (evt.delta) this.cb.onAudio(base64ToInt16(evt.delta));
         break;
       case 'input_audio_buffer.speech_started':

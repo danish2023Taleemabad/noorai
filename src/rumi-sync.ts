@@ -101,7 +101,7 @@ async function syncProfiles(rumi: pg.Client): Promise<void> {
     SELECT id, phone_number, COALESCE(name, first_name) AS name, grades_taught,
            subjects_taught, region, organization, preferred_language
       FROM users
-     WHERE phone_number IS NOT NULL AND COALESCE(is_test_user, false) = false
+     WHERE phone_number IS NOT NULL
   `);
   const z = { n: 0, last: null as Date | null };
   for (const u of res.rows) {
@@ -176,7 +176,6 @@ async function syncMessages(rumi: pg.Client): Promise<void> {
          FROM conversations c
          JOIN users u ON u.id = c.user_id
         WHERE u.phone_number IS NOT NULL
-          AND COALESCE(u.is_test_user, false) = false
           ${first ? '' : 'AND (c.created_at, c.id) > ($1::timestamp, $2::uuid)'}
         ORDER BY c.created_at, c.id
         LIMIT ${MSG_BATCH}`,

@@ -49,6 +49,8 @@ export const config = {
     // Cheap text model used to summarize past calls into per-user memory
     // (runs after a call ends — off the live path).
     memoryModel: env('OPENAI_MEMORY_MODEL', false, 'gpt-4o-mini'),
+    // Embedding model for semantic recall of Rumi history.
+    embedModel: env('OPENAI_EMBED_MODEL', false, 'text-embedding-3-small'),
   },
 
   taleemabad: {
@@ -90,6 +92,9 @@ export const config = {
     // Cap on how many callers get their conversation summary (re)generated per
     // sync run, to bound summarizer cost. Most-recently-active first.
     summaryCap: Number(env('RUMI_SUMMARY_CAP', false, '150')),
+    // Cap on how many Rumi documents get embedded per sync run (bounds cost/time
+    // on the first backfill; embeddings are cheap so this can be generous).
+    embedCap: Number(env('RUMI_EMBED_CAP', false, '5000')),
   },
 
   // Optional TURN relay for hosts (e.g. Railway) that can't do WebRTC over raw

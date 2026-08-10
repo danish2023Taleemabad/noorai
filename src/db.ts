@@ -12,8 +12,12 @@ import { config } from './config.js';
 const { Pool } = pg;
 
 let pool: pg.Pool | null = null;
+// Whether the pgvector extension is available — enables semantic recall. If not,
+// rumi_doc has no embedding column and recall falls back to keyword search.
+let vectorReady = false;
 
 export const dbEnabled = (): boolean => Boolean(config.databaseUrl);
+export const isVectorReady = (): boolean => vectorReady;
 
 export const initDb = async (): Promise<void> => {
   if (!dbEnabled()) {
@@ -129,7 +133,43 @@ export const initDb = async (): Promise<void> => {
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_latency_created ON response_latency (created_at);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_latency_call ON response_latency (wa_call_id);`);
-  console.log('[db] connected — call logging + memory enabled');
+
+  // --- Semantic recall corpus (rumi_doc) ---
+  // One row per retrievable Rumi item (chat message, coaching observation,
+  // lesson plan, reading assessment, quiz) as text, optionally embedded for
+  // semantic search. Retrieval always filters by phone first, so a plain cosine
+  // sort over the caller's rows is fast without an ANN index.
+  try {
+    await pool.query('CREATE EXTENSION IF NOT EXISTS vector');
+    vectorReady = true;
+  } catch (err) {
+    vectorReady = false;
+    console.warn(
+      '[db] pgvector unavailable — semantic recall disabled, keyword fallback:',
+      String(err).slice(0, 120),
+    );
+  }
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS rumi_doc (
+      id           TEXT PRIMARY KEY,
+      phone_number TEXT NOT NULL,
+      kind         TEXT NOT NULL,
+      content      TEXT NOT NULL,
+      created_at   TIMESTAMPTZ,
+      embedded_at  TIMESTAMPTZ
+    );
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_doc_phone ON rumi_doc (phone_number, created_at DESC);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_doc_fts ON rumi_doc USING gin (to_tsvector('simple', content));`);
+  if (vectorReady) {
+    await pool.query(`ALTER TABLE rumi_doc ADD COLUMN IF NOT EXISTS embedding vector(512);`);
+    await pool.query(
+      `CREATE INDEX IF NOT EXISTS idx_doc_pending ON rumi_doc (phone_number) WHERE embedding IS NULL;`,
+    );
+  }
+  console.log(
+    `[db] connected — call logging + memory enabled (semantic recall: ${vectorReady ? 'on' : 'keyword-only'})`,
+  );
 };
 
 /** Returns the caller's rolling memory summary, or null if none/DB off. */
@@ -278,6 +318,118 @@ export const logResponseLatency = async (row: {
     );
   } catch (err) {
     console.warn('[db] logResponseLatency failed:', String(err));
+  }
+};
+
+// ---------------------------------------------------------------------------
+// Semantic recall corpus (rumi_doc)
+// ---------------------------------------------------------------------------
+
+/** Upsert one retrievable Rumi document. Clears the embedding if content changed. */
+export const upsertRumiDoc = async (
+  id: string,
+  phoneNumber: string,
+  kind: string,
+  content: string,
+  createdAt: Date | null,
+): Promise<void> => {
+  if (!pool || !phoneNumber || !content) return;
+  try {
+    const embedReset = vectorReady
+      ? `, embedding = CASE WHEN rumi_doc.content <> EXCLUDED.content THEN NULL ELSE rumi_doc.embedding END,
+             embedded_at = CASE WHEN rumi_doc.content <> EXCLUDED.content THEN NULL ELSE rumi_doc.embedded_at END`
+      : '';
+    await pool.query(
+      `INSERT INTO rumi_doc (id, phone_number, kind, content, created_at)
+       VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (id) DO UPDATE SET content = EXCLUDED.content, created_at = EXCLUDED.created_at${embedReset}`,
+      [id, phoneNumber, kind, content, createdAt],
+    );
+  } catch (err) {
+    console.warn('[db] upsertRumiDoc failed:', String(err));
+  }
+};
+
+/** Docs still needing an embedding (empty if pgvector off). */
+export const getDocsNeedingEmbedding = async (
+  limit: number,
+): Promise<{ id: string; content: string }[]> => {
+  if (!pool || !vectorReady) return [];
+  try {
+    const res = await pool.query(
+      `SELECT id, content FROM rumi_doc WHERE embedding IS NULL ORDER BY created_at DESC NULLS LAST LIMIT $1`,
+      [limit],
+    );
+    return res.rows.map((r) => ({ id: r.id, content: r.content }));
+  } catch (err) {
+    console.warn('[db] getDocsNeedingEmbedding failed:', String(err));
+    return [];
+  }
+};
+
+/** Store a doc's embedding (pgvector literal like "[0.1,0.2,...]"). */
+export const setDocEmbedding = async (
+  id: string,
+  vectorLiteral: string,
+): Promise<void> => {
+  if (!pool || !vectorReady) return;
+  try {
+    await pool.query(
+      `UPDATE rumi_doc SET embedding = $2::vector, embedded_at = now() WHERE id = $1`,
+      [id, vectorLiteral],
+    );
+  } catch (err) {
+    console.warn('[db] setDocEmbedding failed:', String(err));
+  }
+};
+
+/**
+ * Recall the caller's most relevant Rumi documents for a question. Semantic
+ * (pgvector cosine) when an embedding is provided and pgvector is on; otherwise
+ * keyword full-text. LOCAL only — safe on the call path.
+ */
+export const recallRumi = async (
+  phoneNumber: string,
+  opts: { queryEmbedding?: number[]; queryText?: string; limit?: number },
+): Promise<{ kind: string; content: string; createdAt: Date }[]> => {
+  if (!pool || !phoneNumber) return [];
+  const limit = opts.limit ?? 8;
+  try {
+    if (vectorReady && opts.queryEmbedding && opts.queryEmbedding.length) {
+      const literal = `[${opts.queryEmbedding.join(',')}]`;
+      const res = await pool.query(
+        `SELECT kind, content, created_at FROM rumi_doc
+          WHERE phone_number = $1 AND embedding IS NOT NULL
+          ORDER BY embedding <=> $2::vector
+          LIMIT $3`,
+        [phoneNumber, literal, limit],
+      );
+      return res.rows.map((r) => ({
+        kind: r.kind,
+        content: r.content,
+        createdAt: r.created_at,
+      }));
+    }
+    // Keyword fallback.
+    const q = (opts.queryText ?? '').trim();
+    if (!q) return [];
+    const res = await pool.query(
+      `SELECT kind, content, created_at FROM rumi_doc
+        WHERE phone_number = $1
+          AND (to_tsvector('simple', content) @@ plainto_tsquery('simple', $2)
+               OR content ILIKE '%' || $2 || '%')
+        ORDER BY created_at DESC
+        LIMIT $3`,
+      [phoneNumber, q, limit],
+    );
+    return res.rows.map((r) => ({
+      kind: r.kind,
+      content: r.content,
+      createdAt: r.created_at,
+    }));
+  } catch (err) {
+    console.warn('[db] recallRumi failed:', String(err));
+    return [];
   }
 };
 

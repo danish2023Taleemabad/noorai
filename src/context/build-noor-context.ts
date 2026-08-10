@@ -246,11 +246,13 @@ export const buildNoorContext = async (
         (rumi.summary?.trim()
           ? `\nWhat you've discussed with them before:\n${rumi.summary.trim()}\n`
           : '') +
-        `\nFor anything not already shown above, use the search_rumi_history tool — it can look up their whole Rumi history:\n` +
-        `- a specific topic → pass keywords in "query"\n` +
-        `- their FIRST/earliest messages ("what did I first ask", "when did I start") → pass order="oldest"\n` +
-        `- a specific day → pass on_date="YYYY-MM-DD"\n` +
-        `Then answer from what it returns. You have their FULL history — NEVER say you don't have the data; if unsure, search first.`;
+        `\nYou have their FULL Rumi history and TWO tools to reach any of it — NEVER say you don't have the data; look it up first.\n` +
+        `1. recall_rumi(query) — use for ANY open-ended question about their Rumi activity: their coaching/observation ` +
+        `scores and WHY they scored a certain way, the lesson plans Rumi made (to explain or rephrase them), reading ` +
+        `assessments, quizzes, or "what did we discuss about X". Pass their question; it returns the most relevant records.\n` +
+        `2. search_rumi_history — use for precise/temporal lookups: a specific day (on_date="YYYY-MM-DD"), their ` +
+        `first/earliest messages (order="oldest"), or an exact keyword.\n` +
+        `Pick recall_rumi for "why/what/how/explain" questions and search_rumi_history for "when/first/on this date". Answer warmly from what they return.`;
     }
   } catch (err) {
     console.warn(`[rumi] profile lookup failed for ${fromNumber}:`, String(err));

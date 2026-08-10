@@ -185,6 +185,25 @@ export class OpenAIRealtimeSession {
             },
           },
         },
+        {
+          type: 'function',
+          name: 'recall_rumi',
+          description:
+            "Answer ANY question about the caller's history with Rumi — not just chats, but their coaching/observation " +
+            'scores and feedback (e.g. "why did Rumi score me low"), the lesson plans Rumi made for them (e.g. "rephrase my ' +
+            'lesson plan"), reading assessments, and quizzes. Pass the caller\'s question or topic; returns the most ' +
+            'relevant records. Prefer this for open-ended "why/what/how" questions about their Rumi activity.',
+          parameters: {
+            type: 'object',
+            properties: {
+              query: {
+                type: 'string',
+                description: "The caller's question or the topic to look up in their Rumi history",
+              },
+            },
+            required: ['query'],
+          },
+        },
       ];
       session.tool_choice = 'auto';
     }

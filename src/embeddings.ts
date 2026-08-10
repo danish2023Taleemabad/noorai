@@ -10,11 +10,13 @@ import { config } from './config.js';
  */
 
 export const EMBED_DIMS = 512;
-const MAX_CHARS = 6000; // per-input cap (well under the 8k-token per-input limit)
+// Urdu / Arabic script tokenizes to many tokens per character, so these are set
+// conservatively (worst-case ~4 tokens/char) to never exceed the API limits:
+//   - per input: 8,192 tokens  -> 2,000 chars * 4 = 8,000
+//   - per request: 300,000 tokens -> 70,000 chars * 4 = 280,000
+const MAX_CHARS = 2000; // per-input cap
 const MAX_BATCH = 256; // array-size cap
-// Character budget per request — a proxy for the 300k tokens/request API limit.
-// Conservative for multilingual (Urdu) text where tokens/char is higher.
-const CHAR_BUDGET = 300_000;
+const CHAR_BUDGET = 70_000; // total chars per request
 
 /**
  * Embed a list of texts. Returns embeddings aligned to the input (null for any

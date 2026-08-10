@@ -384,6 +384,32 @@ export const setDocEmbedding = async (
 };
 
 /**
+ * Store many embeddings in one statement (fast bulk backfill). Falls back to
+ * per-row updates if the batch statement fails, so progress is guaranteed.
+ */
+export const setDocEmbeddingsBatch = async (
+  rows: { id: string; vectorLiteral: string }[],
+): Promise<void> => {
+  if (!pool || !vectorReady || rows.length === 0) return;
+  const params: unknown[] = [];
+  const tuples = rows.map((r, i) => {
+    params.push(r.id, r.vectorLiteral);
+    return `($${i * 2 + 1}, $${i * 2 + 2}::vector)`;
+  });
+  try {
+    await pool.query(
+      `UPDATE rumi_doc AS d SET embedding = v.emb, embedded_at = now()
+         FROM (VALUES ${tuples.join(',')}) AS v(id, emb)
+        WHERE d.id = v.id`,
+      params,
+    );
+  } catch (err) {
+    console.warn('[db] setDocEmbeddingsBatch failed, falling back per-row:', String(err));
+    for (const r of rows) await setDocEmbedding(r.id, r.vectorLiteral);
+  }
+};
+
+/**
  * Recall the caller's most relevant Rumi documents for a question. Semantic
  * (pgvector cosine) when an embedding is provided and pgvector is on; otherwise
  * keyword full-text. LOCAL only — safe on the call path.

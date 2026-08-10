@@ -6,7 +6,7 @@ import {
   isVectorReady,
   upsertRumiDoc,
   getDocsNeedingEmbedding,
-  setDocEmbedding,
+  setDocEmbeddingsBatch,
 } from './db.js';
 import { embedTexts, toVectorLiteral } from './embeddings.js';
 
@@ -476,10 +476,12 @@ async function embedPendingDocs(): Promise<void> {
     const batch = await getDocsNeedingEmbedding(256);
     if (batch.length === 0) break;
     const vecs = await embedTexts(batch.map((d) => d.content));
+    const updates: { id: string; vectorLiteral: string }[] = [];
     for (let i = 0; i < batch.length; i += 1) {
       const v = vecs[i];
-      if (v) await setDocEmbedding(batch[i].id, toVectorLiteral(v));
+      if (v) updates.push({ id: batch[i].id, vectorLiteral: toVectorLiteral(v) });
     }
+    await setDocEmbeddingsBatch(updates);
     done += batch.length;
     if (batch.length < 256) break;
   }

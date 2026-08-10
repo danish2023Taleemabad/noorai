@@ -1,6 +1,14 @@
 import pg from 'pg';
 import { config } from './config.js';
-import { getPool, dbEnabled } from './db.js';
+import {
+  getPool,
+  dbEnabled,
+  isVectorReady,
+  upsertRumiDoc,
+  getDocsNeedingEmbedding,
+  setDocEmbedding,
+} from './db.js';
+import { embedTexts, toVectorLiteral } from './embeddings.js';
 
 /**
  * Rumi history sync (Option A).
@@ -287,6 +295,197 @@ async function summarize(transcript: string): Promise<string | null> {
   }
 }
 
+// ---- structured records + message docs -> semantic recall corpus ----
+
+const stripHtml = (s: string): string =>
+  s.replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+
+const jstr = (v: unknown, max = 3000): string => {
+  try {
+    return JSON.stringify(v).slice(0, max);
+  } catch {
+    return '';
+  }
+};
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+// Render a JSON value (string | object | array-of-either) into readable text,
+// pulling common text fields out of objects rather than "[object Object]".
+const renderItem = (x: any): string => {
+  if (x == null) return '';
+  if (typeof x === 'string') return x.trim();
+  if (typeof x === 'object') {
+    const t = x.title ?? x.description ?? x.text ?? x.point ?? x.detail ?? x.summary ?? x.recommendation;
+    return t ? String(t).trim() : jstr(x, 200);
+  }
+  return String(x);
+};
+const renderVal = (v: any): string => {
+  if (Array.isArray(v)) return v.map(renderItem).filter(Boolean).join('; ');
+  return renderItem(v);
+};
+/* eslint-enable @typescript-eslint/no-explicit-any */
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+const fmtCoaching = (r: any): string => {
+  const a = r.analysis_data ?? {};
+  const scores = a.scores ?? {};
+  const overall = scores.percentage ?? scores.overall_percentage ?? scores.overall ?? null;
+  let text = `Coaching observation${a.framework ? ` (${a.framework})` : ''}${r.observation_type ? ` [${r.observation_type}]` : ''}`;
+  const subj = [a.topic, a.subject].filter(Boolean).join(' / ');
+  if (subj) text += ` on ${subj}`;
+  if (overall != null) text += `, overall score ${overall}%`;
+  if (scores.grand_total != null && scores.max_marks != null)
+    text += ` (${scores.grand_total}/${scores.max_marks} marks)`;
+  text += '.';
+  // Per-goal / per-domain labelled breakdown (keys like goal5_classroom_management).
+  const goalLines: string[] = [];
+  for (const [k, v] of Object.entries<any>(a)) {
+    if (!/^goal\d|^domain\d/.test(k)) continue;
+    const label = k.replace(/^(goal|domain)\d+_/, '').replace(/_/g, ' ');
+    const grp = k.match(/^(goal\d+|domain\d+)/)?.[0];
+    const tot = grp ? scores[`${grp}_total`] : undefined;
+    if (typeof v === 'string' && v.trim())
+      goalLines.push(`${label}${tot != null ? ` (${tot})` : ''}: ${v.trim().slice(0, 200)}`);
+    else if (v && typeof v === 'object') {
+      const s = v.score ?? v.total ?? v.marks ?? tot;
+      const cmt = v.comment ?? v.feedback ?? v.summary;
+      goalLines.push(`${label}${s != null ? `: ${s}` : ''}${cmt ? ` — ${String(cmt).slice(0, 150)}` : ''}`);
+    } else if (tot != null) goalLines.push(`${label}: ${tot}`);
+  }
+  if (goalLines.length) text += ` Breakdown — ${goalLines.join('; ')}.`;
+  for (const key of ['executive_summary', 'strengths', 'growth_opportunities', 'recommendations', 'areas_for_improvement', 'debrief_reflection', 'notable_moments', 'feedback', 'summary']) {
+    const s = renderVal(a[key]);
+    if (s) text += ` ${key.replace(/_/g, ' ')}: ${s.slice(0, 500)}.`;
+  }
+  if (r.prioritized_action) {
+    const pa = typeof r.prioritized_action === 'string' ? r.prioritized_action : jstr(r.prioritized_action, 400);
+    text += ` Prioritized action: ${pa}.`;
+  }
+  if (r.transcript_text)
+    text += ` Lesson transcript excerpt: ${String(r.transcript_text).replace(/\s+/g, ' ').slice(0, 600)}.`;
+  return text.slice(0, 4000);
+};
+
+const fmtLessonPlan = (r: any): string => {
+  const head =
+    `Lesson plan${r.topic ? ` on "${r.topic}"` : ''}` +
+    `${r.grade ? ` (Grade ${r.grade}${r.subject ? ` ${r.subject}` : ''})` : r.subject ? ` (${r.subject})` : ''}` +
+    `${r.type ? ` [${r.type}]` : ''}.`;
+  let body = '';
+  if (r.lesson_plan_html) body = stripHtml(String(r.lesson_plan_html));
+  if (!body && r.content) body = typeof r.content === 'string' ? r.content : jstr(r.content, 4000);
+  return `${head} ${body}`.slice(0, 5000);
+};
+
+const fmtReading = (r: any): string => {
+  const parts = ['Reading assessment'];
+  if (r.grade_level != null) parts.push(`grade ${r.grade_level}`);
+  if (r.language) parts.push(String(r.language));
+  if (r.passage_title) parts.push(`passage "${r.passage_title}"`);
+  if (r.wcpm != null) parts.push(`WCPM ${Math.round(r.wcpm)}`);
+  if (r.accuracy_percentage != null) parts.push(`accuracy ${Math.round(r.accuracy_percentage)}%`);
+  if (r.comprehension_score != null) parts.push(`comprehension ${Math.round(r.comprehension_score)}%`);
+  if (r.on_track != null) parts.push(r.on_track ? 'on track' : 'below benchmark');
+  let text = `${parts.join(', ')}.`;
+  if (r.diagnostic_summary) text += ` ${String(r.diagnostic_summary).slice(0, 600)}`;
+  return text.slice(0, 3000);
+};
+
+const fmtQuiz = (r: any): string => {
+  const parts = ['Quiz'];
+  if (r.student_name) parts.push(`for ${r.student_name}`);
+  if (r.student_class) parts.push(`class ${r.student_class}`);
+  if (r.mastery_percentage != null) parts.push(`mastery ${r.mastery_percentage}%`);
+  if (r.mastery_level) parts.push(String(r.mastery_level));
+  if (r.correct_answers != null && r.total_questions_answered != null)
+    parts.push(`${r.correct_answers}/${r.total_questions_answered} correct`);
+  return `${parts.join(', ')}.`;
+};
+
+async function syncKind(
+  rumi: pg.Client,
+  kind: string,
+  wmKey: string,
+  selectCols: string,
+  fromJoin: string,
+  toContent: (r: any) => string,
+): Promise<void> {
+  const wm = await getState(wmKey);
+  const res = await rumi.query(
+    `SELECT ${selectCols}, x.created_at, u.phone_number
+       FROM ${fromJoin}
+      WHERE u.phone_number IS NOT NULL ${wm ? 'AND x.created_at > $1' : ''}
+      ORDER BY x.created_at ASC
+      LIMIT 20000`,
+    wm ? [wm] : [],
+  );
+  if (res.rows.length === 0) {
+    console.log(`[rumi-sync] ${kind} docs: 0 new`);
+    return;
+  }
+  let maxTs = wm;
+  for (const r of res.rows) {
+    const content = toContent(r);
+    if (r.phone_number && content) {
+      await upsertRumiDoc(`${kind}:${r.id}`, r.phone_number, kind, content, r.created_at);
+    }
+    const ts = new Date(r.created_at).toISOString();
+    if (!maxTs || ts > maxTs) maxTs = ts;
+  }
+  if (maxTs) await setState(wmKey, maxTs);
+  console.log(`[rumi-sync] ${kind} docs: ${res.rows.length} new`);
+}
+
+/** Pull structured Rumi records (coaching, lesson plans, reading, quizzes). */
+async function syncStructured(rumi: pg.Client): Promise<void> {
+  await syncKind(rumi, 'coaching', 'rumi_coaching_wm',
+    'x.id, x.analysis_data, x.observation_type, x.prioritized_action, x.photo_analysis, x.transcript_text',
+    'coaching_sessions x JOIN users u ON u.id = x.user_id', fmtCoaching);
+  await syncKind(rumi, 'lesson_plan', 'rumi_lp_wm',
+    'x.id, x.topic, x.grade, x.subject, x.type, x.content, x.lesson_plan_html',
+    'lesson_plans x JOIN users u ON u.id = x.user_id', fmtLessonPlan);
+  await syncKind(rumi, 'reading', 'rumi_reading_wm',
+    'x.id, x.grade_level, x.language, x.passage_title, x.wcpm, x.accuracy_percentage, x.comprehension_score, x.on_track, x.diagnostic_summary',
+    'reading_assessments x JOIN users u ON u.id = x.user_id', fmtReading);
+  await syncKind(rumi, 'quiz', 'rumi_quiz_wm',
+    'x.id, x.student_name, x.student_class, x.mastery_percentage, x.mastery_level, x.correct_answers, x.total_questions_answered',
+    'quiz_sessions x JOIN users u ON u.id = x.user_id', fmtQuiz);
+}
+/* eslint-enable @typescript-eslint/no-explicit-any */
+
+/** Copy substantive chat messages from the local mirror into the recall corpus. */
+async function syncMessageDocs(): Promise<void> {
+  const pool = getPool();
+  if (!pool) return;
+  const res = await pool.query(`
+    INSERT INTO rumi_doc (id, phone_number, kind, content, created_at)
+    SELECT 'message:' || m.id, m.phone_number, 'message', m.content, m.created_at
+      FROM rumi_message m
+     WHERE length(m.content) >= 20 AND left(m.content, 1) NOT IN ('/', '[')
+    ON CONFLICT (id) DO NOTHING
+  `);
+  console.log(`[rumi-sync] message docs added: ${res.rowCount ?? 0}`);
+}
+
+/** Embed any rumi_doc rows missing an embedding (capped per run). */
+async function embedPendingDocs(): Promise<void> {
+  if (!isVectorReady()) return;
+  let done = 0;
+  while (done < config.rumi.embedCap) {
+    const batch = await getDocsNeedingEmbedding(256);
+    if (batch.length === 0) break;
+    const vecs = await embedTexts(batch.map((d) => d.content));
+    for (let i = 0; i < batch.length; i += 1) {
+      const v = vecs[i];
+      if (v) await setDocEmbedding(batch[i].id, toVectorLiteral(v));
+    }
+    done += batch.length;
+    if (batch.length < 256) break;
+  }
+  if (done) console.log(`[rumi-sync] embedded ${done} doc(s)`);
+}
+
 /** Run one full sync pass. Never throws. */
 export async function runRumiSync(): Promise<void> {
   if (!rumiEnabled()) {
@@ -309,6 +508,9 @@ export async function runRumiSync(): Promise<void> {
     await syncProfiles(rumi);
     await syncMessages(rumi);
     await refreshMessageStats();
+    await syncStructured(rumi);
+    await syncMessageDocs();
+    await embedPendingDocs();
     await summarizeProfiles();
     console.log(`[rumi-sync] done in ${Math.round((Date.now() - startedAt) / 1000)}s`);
   } catch (err) {

@@ -12,8 +12,11 @@ import {
   setUserMemoryGradeSubject,
   searchRumiHistory,
   logResponseLatency,
+  recallRumi,
+  isVectorReady,
 } from '../db.js';
 import { syncCallerDelta } from '../rumi-sync.js';
+import { embedTexts } from '../embeddings.js';
 import {
   downmixToMono,
   resampleLinear,
@@ -219,6 +222,37 @@ export class CallSession {
               return `[${date}] ${who}: ${h.content}`;
             })
             .join('\n');
+        }
+
+        if (name === 'recall_rumi') {
+          const q = String(args.query ?? '').trim();
+          if (!q) return 'No question given.';
+          // Embed the question (one small call) for semantic recall; fall back
+          // to keyword if embeddings/pgvector aren't available. Local search
+          // over the caller's synced corpus — no live Rumi-prod call.
+          let queryEmbedding: number[] | undefined;
+          if (isVectorReady()) {
+            const [e] = await embedTexts([q]);
+            queryEmbedding = e ?? undefined;
+          }
+          const hits = await recallRumi(this.fromNumber, {
+            queryEmbedding,
+            queryText: q,
+            limit: 6,
+          });
+          console.log(
+            `${this.#tag} [rumi] recall "${q}" (${queryEmbedding ? 'semantic' : 'keyword'}) -> ${hits.length} hits`,
+          );
+          if (hits.length === 0) {
+            return 'Nothing found in their Rumi history about that.';
+          }
+          // Truncate each record for a voice-sized tool result.
+          return hits
+            .map((h) => {
+              const date = new Date(h.createdAt).toISOString().slice(0, 10);
+              return `[${date}] (${h.kind}) ${h.content.replace(/\s+/g, ' ').slice(0, 1200)}`;
+            })
+            .join('\n\n');
         }
 
         return 'Unknown tool.';

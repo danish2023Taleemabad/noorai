@@ -10,19 +10,35 @@ import { config } from './config.js';
  */
 
 export const EMBED_DIMS = 512;
-const MAX_CHARS = 6000; // keep well under the model's token limit
-const BATCH = 256;
+const MAX_CHARS = 6000; // per-input cap (well under the 8k-token per-input limit)
+const MAX_BATCH = 256; // array-size cap
+// Character budget per request — a proxy for the 300k tokens/request API limit.
+// Conservative for multilingual (Urdu) text where tokens/char is higher.
+const CHAR_BUDGET = 300_000;
 
 /**
  * Embed a list of texts. Returns embeddings aligned to the input (null for any
- * that failed). Never throws.
+ * that failed). Never throws. Batches by BOTH array size and total characters,
+ * so a request can't blow the per-request token limit.
  */
 export async function embedTexts(texts: string[]): Promise<(number[] | null)[]> {
+  const clean = texts.map((t) => (t || '').slice(0, MAX_CHARS) || ' ');
   const out: (number[] | null)[] = new Array(texts.length).fill(null);
-  for (let i = 0; i < texts.length; i += BATCH) {
-    const slice = texts
-      .slice(i, i + BATCH)
-      .map((t) => (t || '').slice(0, MAX_CHARS) || ' ');
+  let i = 0;
+  while (i < clean.length) {
+    // Grow a batch until the count or character budget would be exceeded.
+    let j = i;
+    let chars = 0;
+    while (
+      j < clean.length &&
+      j - i < MAX_BATCH &&
+      chars + clean[j].length <= CHAR_BUDGET
+    ) {
+      chars += clean[j].length;
+      j += 1;
+    }
+    if (j === i) j = i + 1; // always make progress (single oversized input)
+    const slice = clean.slice(i, j);
     try {
       const res = await fetch('https://api.openai.com/v1/embeddings', {
         method: 'POST',
@@ -37,16 +53,17 @@ export async function embedTexts(texts: string[]): Promise<(number[] | null)[]> 
         }),
       });
       if (!res.ok) {
-        console.warn('[embed] HTTP', res.status);
-        continue;
+        console.warn('[embed] HTTP', res.status, (await res.text()).slice(0, 200));
+      } else {
+        const data = (await res.json()) as {
+          data?: { embedding: number[]; index: number }[];
+        };
+        for (const d of data.data ?? []) out[i + d.index] = d.embedding;
       }
-      const data = (await res.json()) as {
-        data?: { embedding: number[]; index: number }[];
-      };
-      for (const d of data.data ?? []) out[i + d.index] = d.embedding;
     } catch (err) {
-      console.warn('[embed] failed:', String(err).slice(0, 100));
+      console.warn('[embed] failed:', String(err).slice(0, 120));
     }
+    i = j;
   }
   return out;
 }

@@ -558,6 +558,7 @@ const getDeltaPool = (): pg.Pool | null => {
  * callers we've already synced before (first-timers are handled by the batch
  * sync). Never throws.
  */
+/* eslint-disable @typescript-eslint/no-explicit-any */
 export async function syncCallerDelta(
   phone: string,
 ): Promise<{ role: string; content: string; createdAt: Date }[]> {
@@ -565,44 +566,140 @@ export async function syncCallerDelta(
   const rumi = getDeltaPool();
   if (!noor || !rumi || !phone) return [];
   try {
-    const wm = await noor.query(
-      `SELECT max(created_at) mx FROM rumi_message WHERE phone_number = $1`,
+    // Resolve the caller's Rumi user_id(s) + current profile fields (indexed by
+    // phone_number). One phone can rarely map to >1 user — handle all.
+    const ures = await rumi.query(
+      `SELECT id, COALESCE(name, first_name) AS name, grades_taught, subjects_taught,
+              region, organization, preferred_language, lesson_plans_count,
+              lesson_plans_last_at, coaching_sessions_count, coaching_avg_percentage,
+              coaching_sessions_last_at, reading_assessments_count, quizzes_count,
+              videos_count, last_activity_at
+         FROM users WHERE phone_number = $1`,
       [phone],
     );
-    const since: Date | null = wm.rows[0]?.mx ?? null;
-    if (!since) return []; // never synced this caller — leave it to the batch job
-    const res = await rumi.query(
-      `SELECT c.id, c.role, c.content, c.message_type, c.created_at
-         FROM conversations c JOIN users u ON u.id = c.user_id
-        WHERE u.phone_number = $1 AND c.created_at > $2
-        ORDER BY c.created_at ASC LIMIT 200`,
-      [phone, since],
+    if (ures.rows.length === 0) return [];
+    const userIds = ures.rows.map((r) => r.id);
+    const u = ures.rows[0];
+
+    // Refresh this caller's profile stats.
+    await noor.query(
+      `INSERT INTO rumi_profile (
+         phone_number, rumi_user_id, name, grades_taught, subjects_taught, region,
+         organization, preferred_language, lesson_plans_count, lesson_plans_last_at,
+         coaching_sessions_count, coaching_avg_percentage, coaching_sessions_last_at,
+         reading_assessments_count, quizzes_count, videos_count, last_activity_at, synced_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, now())
+       ON CONFLICT (phone_number) DO UPDATE SET
+         rumi_user_id = EXCLUDED.rumi_user_id, name = EXCLUDED.name,
+         grades_taught = EXCLUDED.grades_taught, subjects_taught = EXCLUDED.subjects_taught,
+         region = EXCLUDED.region, organization = EXCLUDED.organization,
+         preferred_language = EXCLUDED.preferred_language,
+         lesson_plans_count = EXCLUDED.lesson_plans_count, lesson_plans_last_at = EXCLUDED.lesson_plans_last_at,
+         coaching_sessions_count = EXCLUDED.coaching_sessions_count, coaching_avg_percentage = EXCLUDED.coaching_avg_percentage,
+         coaching_sessions_last_at = EXCLUDED.coaching_sessions_last_at,
+         reading_assessments_count = EXCLUDED.reading_assessments_count,
+         quizzes_count = EXCLUDED.quizzes_count, videos_count = EXCLUDED.videos_count,
+         last_activity_at = EXCLUDED.last_activity_at, synced_at = now()`,
+      [phone, u.id, u.name, flattenJson(u.grades_taught), flattenJson(u.subjects_taught),
+        u.region, u.organization, u.preferred_language, u.lesson_plans_count, u.lesson_plans_last_at,
+        u.coaching_sessions_count, u.coaching_avg_percentage, u.coaching_sessions_last_at,
+        u.reading_assessments_count, u.quizzes_count, u.videos_count, u.last_activity_at],
     );
-    if (res.rows.length === 0) return [];
-    for (const r of res.rows) {
+
+    // Local watermarks: last synced message, and last doc per kind.
+    const wmMsg: Date | null =
+      (await noor.query(`SELECT max(created_at) mx FROM rumi_message WHERE phone_number = $1`, [phone]))
+        .rows[0]?.mx ?? null;
+    const wmDoc: Record<string, Date> = {};
+    for (const r of (await noor.query(
+      `SELECT kind, max(created_at) mx FROM rumi_doc WHERE phone_number = $1 GROUP BY kind`, [phone],
+    )).rows) wmDoc[r.kind] = r.mx;
+
+    // New messages (delta since watermark; for a never-synced caller, recent 300).
+    const isDelta = wmMsg != null;
+    const mres = await rumi.query(
+      `SELECT c.id, c.role, c.content, c.message_type, c.created_at
+         FROM conversations c
+        WHERE c.user_id = ANY($1::uuid[]) ${isDelta ? 'AND c.created_at > $2' : ''}
+        ORDER BY c.created_at ${isDelta ? 'ASC' : 'DESC'}
+        LIMIT ${isDelta ? 500 : 300}`,
+      isDelta ? [userIds, wmMsg] : [userIds],
+    );
+    const mrows = isDelta ? mres.rows : mres.rows.slice().reverse();
+    const injectable: { role: string; content: string; createdAt: Date }[] = [];
+    for (const m of mrows) {
       await noor.query(
         `INSERT INTO rumi_message (id, phone_number, role, content, message_type, created_at)
          VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (id) DO UPDATE SET content = EXCLUDED.content`,
-        [r.id, phone, r.role, r.content, r.message_type, r.created_at],
+        [m.id, phone, m.role, m.content, m.message_type, m.created_at],
       );
+      const cnt = String(m.content ?? '');
+      if (cnt.length >= 20 && cnt[0] !== '/' && cnt[0] !== '[')
+        await upsertRumiDoc(`message:${m.id}`, phone, 'message', cnt, m.created_at);
+      if (isDelta) injectable.push({ role: m.role, content: m.content, createdAt: m.created_at });
     }
+
+    // New structured records (index-backed by user_id).
+    const kinds: { kind: string; table: string; cols: string; fmt: (r: any) => string }[] = [
+      { kind: 'coaching', table: 'coaching_sessions', fmt: fmtCoaching,
+        cols: 'x.id, x.analysis_data, x.observation_type, x.prioritized_action, x.photo_analysis, x.transcript_text, x.created_at' },
+      { kind: 'lesson_plan', table: 'lesson_plans', fmt: fmtLessonPlan,
+        cols: 'x.id, x.topic, x.grade, x.subject, x.type, x.content, x.lesson_plan_html, x.created_at' },
+      { kind: 'reading', table: 'reading_assessments', fmt: fmtReading,
+        cols: 'x.id, x.grade_level, x.language, x.passage_title, x.wcpm, x.accuracy_percentage, x.comprehension_score, x.on_track, x.diagnostic_summary, x.created_at' },
+      { kind: 'quiz', table: 'quiz_sessions', fmt: fmtQuiz,
+        cols: 'x.id, x.student_name, x.student_class, x.mastery_percentage, x.mastery_level, x.correct_answers, x.total_questions_answered, x.created_at' },
+    ];
+    for (const k of kinds) {
+      const wm = wmDoc[k.kind] ?? null;
+      const res = await rumi.query(
+        `SELECT ${k.cols} FROM ${k.table} x
+          WHERE x.user_id = ANY($1::uuid[]) ${wm ? 'AND x.created_at > $2' : ''}
+          ORDER BY x.created_at ASC LIMIT 500`,
+        wm ? [userIds, wm] : [userIds],
+      );
+      for (const r of res.rows) {
+        const content = k.fmt(r);
+        if (content) await upsertRumiDoc(`${k.kind}:${r.id}`, phone, k.kind, content, r.created_at);
+      }
+    }
+
+    // Refresh first/last message stats.
     await noor.query(
-      `UPDATE rumi_profile p SET last_message_at = s.mx, message_count = s.n
-         FROM (SELECT max(created_at) mx, count(*)::int n FROM rumi_message WHERE phone_number = $1) s
+      `UPDATE rumi_profile p SET last_message_at = s.mx, first_message_at = s.mn, message_count = s.n
+         FROM (SELECT max(created_at) mx, min(created_at) mn, count(*)::int n FROM rumi_message WHERE phone_number = $1) s
         WHERE p.phone_number = $1`,
       [phone],
     );
-    console.log(`[rumi-delta] ${phone}: +${res.rows.length} new message(s)`);
-    return res.rows.map((r) => ({
-      role: r.role,
-      content: r.content,
-      createdAt: r.created_at,
-    }));
+
+    // Embed this caller's new docs (small; background — off the call path).
+    if (isVectorReady()) {
+      const pend = await noor.query(
+        `SELECT id, content FROM rumi_doc WHERE phone_number = $1 AND embedding IS NULL LIMIT 512`,
+        [phone],
+      );
+      if (pend.rows.length) {
+        const vecs = await embedTexts(pend.rows.map((r) => r.content));
+        const updates: { id: string; vectorLiteral: string }[] = [];
+        for (let i = 0; i < pend.rows.length; i += 1) {
+          const v = vecs[i];
+          if (v) updates.push({ id: pend.rows[i].id, vectorLiteral: toVectorLiteral(v) });
+        }
+        await setDocEmbeddingsBatch(updates);
+      }
+    }
+
+    console.log(
+      `[rumi-caller] ${phone}: ${isDelta ? `+${injectable.length} new msg` : 'first-time backfill'} + profile/coaching/LP/reading/quiz refreshed`,
+    );
+    // Only fold a SMALL incremental delta into the live prompt (tools cover the rest).
+    return injectable.length <= 40 ? injectable : [];
   } catch (err) {
-    console.warn('[rumi-delta] failed (fail-open):', String(err).slice(0, 120));
+    console.warn('[rumi-caller] failed (fail-open):', String(err).slice(0, 150));
     return [];
   }
 }
+/* eslint-enable @typescript-eslint/no-explicit-any */
 
 /**
  * Start the background scheduler: first run ~30s after boot (off the cold-start

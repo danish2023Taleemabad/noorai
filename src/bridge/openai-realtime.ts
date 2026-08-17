@@ -25,8 +25,15 @@ export interface RealtimeCallbacks {
   /**
    * Called once per response with Noor's response latency in ms — the time from
    * the caller finishing their turn (speech_stopped) to Noor's first audio.
+   * (OpenAI voice path only; the Uplift path measures its own latency.)
    */
   onResponseLatency?: (ms: number) => void;
+  /** Text output deltas — used on the Uplift voice path (output = text). */
+  onTextDelta?: (delta: string) => void;
+  /** Full text of a finished response — Uplift voice path. */
+  onTextDone?: (text: string) => void;
+  /** Caller finished their turn — Uplift voice path uses this to time latency. */
+  onSpeechStopped?: () => void;
   /**
    * Called when the model invokes a function tool. Returns the tool's output
    * text (fed back to the model). If provided, the lookup_curriculum tool is
@@ -50,6 +57,9 @@ export class OpenAIRealtimeSession {
   constructor(
     private instructions: string,
     private readonly cb: RealtimeCallbacks,
+    // 'audio' (default) = OpenAI speaks natively; 'text' = OpenAI emits text
+    // (spoken by Uplift on the caller side). Default keeps current behavior.
+    private readonly outputMode: 'audio' | 'text' = 'audio',
   ) {}
 
   /**
@@ -115,7 +125,7 @@ export class OpenAIRealtimeSession {
     const session: Record<string, unknown> = {
       type: 'realtime',
       instructions: this.instructions,
-      output_modalities: ['audio'],
+      output_modalities: this.outputMode === 'text' ? ['text'] : ['audio'],
       audio: {
         input: {
           format: { type: 'audio/pcm', rate: OPENAI_RATE },
@@ -223,6 +233,7 @@ export class OpenAIRealtimeSession {
       call_id?: string;
       name?: string;
       arguments?: string;
+      text?: string;
       item?: { type?: string; call_id?: string; name?: string };
     };
     try {
@@ -253,6 +264,16 @@ export class OpenAIRealtimeSession {
         console.log('[realtime] speech_stopped (turn end)');
         // Start the response-latency clock for this turn.
         this.#speechStoppedAt = Date.now();
+        this.cb.onSpeechStopped?.();
+        break;
+      // Text output (Uplift voice path): stream deltas + the finished text.
+      case 'response.output_text.delta':
+      case 'response.text.delta':
+        if (evt.delta) this.cb.onTextDelta?.(evt.delta);
+        break;
+      case 'response.output_text.done':
+      case 'response.text.done':
+        if (evt.text) this.cb.onTextDone?.(evt.text);
         break;
       case 'response.output_audio.delta':
       case 'response.audio.delta': // older event name — support both

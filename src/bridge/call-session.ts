@@ -22,6 +22,7 @@ import {
   downmixToMono,
   resampleLinear,
   upsample24to48,
+  StreamResampler,
   OPENAI_RATE,
   WHATSAPP_RATE,
 } from './audio.js';
@@ -120,6 +121,7 @@ export class CallSession {
 
   // Uplift voice path (only when VOICE_PROVIDER=uplift and connect succeeds).
   #uplift: UpliftTtsSession | null = null;
+  #upResampler: StreamResampler | null = null; // stateful 22.05k -> 48k (no boundary clicks)
   #textBuf = ''; // accumulates OpenAI text deltas until a sentence is ready
   #responseText = ''; // full text of the in-flight response (for the transcript)
   #speechStoppedAt = 0; // for Uplift-path response-latency timing
@@ -173,6 +175,7 @@ export class CallSession {
     let useUplift = config.voiceProvider === 'uplift' && Boolean(config.uplift.apiKey);
     let upliftConnect: Promise<void> | null = null;
     if (useUplift) {
+      this.#upResampler = new StreamResampler(UPLIFT_RATE, WHATSAPP_RATE);
       this.#uplift = new UpliftTtsSession({
         onPcm: (pcm) => this.#onUpliftPcm(pcm),
         onError: (e) => console.warn(`${this.#tag} [uplift] ${String(e).slice(0, 120)}`),
@@ -212,8 +215,10 @@ export class CallSession {
         console.log(`${this.#tag} caller speaking (barge-in) — flushing playout`);
         this.#flushPlayout();
         if (this.#uplift) {
-          // Drop in-flight Uplift audio + any half-buffered text.
+          // Drop in-flight Uplift audio + any half-buffered text, and reset the
+          // resampler (the next audio is discontinuous after a flush).
           this.#uplift.cancel();
+          this.#upResampler?.reset();
           this.#textBuf = '';
           this.#responseText = '';
         }
@@ -246,7 +251,10 @@ export class CallSession {
         this.#textBuf += delta;
         const { sentences, rest } = splitSentences(this.#textBuf);
         this.#textBuf = rest;
-        for (const s of sentences) this.#uplift.speak(s);
+        for (const s of sentences) {
+          console.log(`${this.#tag} [uplift] speak: ${s.slice(0, 80)}`);
+          this.#uplift.speak(s);
+        }
       },
       onTextDone: (text) => {
         if (this.#closed || !this.#uplift) return;
@@ -483,11 +491,16 @@ export class CallSession {
         latencyMs: ms,
       }).catch(() => undefined);
     }
-    this.#enqueuePlayout(resampleLinear(pcm22k, UPLIFT_RATE, OPENAI_RATE));
+    // Stateful resample straight to 48 kHz (continuous across chunks — no clicks).
+    if (this.#upResampler) this.#pushPlayout48(this.#upResampler.process(pcm22k));
   }
 
   #enqueuePlayout(pcm24k: Int16Array): void {
-    const pcm48k = upsample24to48(pcm24k);
+    this.#pushPlayout48(upsample24to48(pcm24k));
+  }
+
+  #pushPlayout48(pcm48k: Int16Array): void {
+    if (pcm48k.length === 0) return;
     this.#chunks.push(pcm48k);
     this.#buffered += pcm48k.length;
     // Drop oldest audio if we've buffered more than the cap (bounds latency).

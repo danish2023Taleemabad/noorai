@@ -57,6 +57,59 @@ export const resampleLinear = (
   return out;
 };
 
+/**
+ * Stateful streaming linear resampler. Unlike `resampleLinear`, this carries the
+ * fractional read position and the previous chunk's last sample across calls, so
+ * back-to-back chunks resample WITHOUT a discontinuity (click) at each boundary.
+ * Use one instance per continuous audio stream (e.g. Uplift TTS -> 48 kHz).
+ */
+export class StreamResampler {
+  #step: number; // input samples advanced per output sample
+  #cursor = 0; // fractional read position; 0 == the previous chunk's last sample
+  #prev = 0; // last sample of the previous chunk
+  #primed = false;
+
+  constructor(fromRate: number, toRate: number) {
+    this.#step = fromRate / toRate;
+  }
+
+  process(input: Int16Array): Int16Array {
+    if (input.length === 0) return new Int16Array(0);
+    // Virtual data = [prev, ...input] once primed, so interpolation can bridge
+    // the boundary between the previous chunk and this one.
+    let data: Int16Array;
+    if (this.#primed) {
+      data = new Int16Array(input.length + 1);
+      data[0] = this.#prev;
+      data.set(input, 1);
+    } else {
+      data = input;
+    }
+    const out: number[] = [];
+    let c = this.#cursor;
+    const last = data.length - 1;
+    while (c <= last) {
+      const i = Math.floor(c);
+      const f = c - i;
+      const a = data[i];
+      const b = i + 1 <= last ? data[i + 1] : a;
+      out.push((a + (b - a) * f) | 0);
+      c += this.#step;
+    }
+    this.#cursor = c - last; // leftover, relative to this chunk's last sample
+    this.#prev = data[last];
+    this.#primed = true;
+    return Int16Array.from(out);
+  }
+
+  /** Reset continuity (e.g. after a barge-in flush, where audio is discontinuous). */
+  reset(): void {
+    this.#cursor = 0;
+    this.#prev = 0;
+    this.#primed = false;
+  }
+}
+
 /** Interleaved stereo -> mono by averaging L/R. Returns input unchanged if mono. */
 export const downmixToMono = (
   samples: Int16Array,

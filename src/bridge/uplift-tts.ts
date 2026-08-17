@@ -27,6 +27,12 @@ export class UpliftTtsSession {
   #seq = 0;
   #generation = 0; // bumped on cancel() so late chunks are ignored
   #active = new Set<string>(); // requestIds whose audio we still want
+  // In-order playback: audio for sentence N is held until sentence N-1 finishes,
+  // so pipelined (concurrent) synth requests never interleave/overlap.
+  #order: string[] = []; // requestIds in the order we sent them
+  #head = 0; // index in #order currently being played out
+  #buffed = new Map<string, Int16Array[]>(); // chunks buffered for not-yet-head reqs
+  #ended = new Set<string>(); // requestIds that have received audio_end
 
   constructor(private readonly cb: UpliftCallbacks) {}
 
@@ -62,10 +68,18 @@ export class UpliftTtsSession {
               // Copy into an aligned Int16Array (little-endian PCM16).
               const pcm = new Int16Array(buf.length >> 1);
               for (let i = 0; i < pcm.length; i += 1) pcm[i] = buf.readInt16LE(i * 2);
-              this.cb.onPcm(pcm);
+              if (this.#order[this.#head] === m.requestId) {
+                this.cb.onPcm(pcm); // this sentence is the one currently playing
+              } else {
+                // A later sentence finished early — hold its audio in order.
+                const arr = this.#buffed.get(m.requestId) ?? [];
+                arr.push(pcm);
+                this.#buffed.set(m.requestId, arr);
+              }
             }
           } else if (m.type === 'audio_end' && m.requestId) {
-            this.#active.delete(m.requestId);
+            this.#ended.add(m.requestId);
+            this.#drain();
           }
         });
         socket.on('connect_error', (e) => {
@@ -82,12 +96,13 @@ export class UpliftTtsSession {
     });
   }
 
-  /** Queue a piece of text to speak. Audio arrives via onPcm. */
+  /** Queue a piece of text to speak. Audio arrives via onPcm, in send order. */
   speak(text: string): void {
     if (!this.#ready || !this.#socket || !text.trim()) return;
     const requestId = `g${this.#generation}_${this.#seq}`;
     this.#seq += 1;
     this.#active.add(requestId);
+    this.#order.push(requestId);
     this.#socket.emit('synthesize', {
       type: 'synthesize',
       requestId,
@@ -97,10 +112,32 @@ export class UpliftTtsSession {
     });
   }
 
-  /** Barge-in: drop all in-flight audio (new requests start a new generation). */
+  /** Advance playback in send order, flushing any buffered audio for the new
+   *  head and skipping past finished sentences. */
+  #drain(): void {
+    while (this.#head < this.#order.length) {
+      const id = this.#order[this.#head];
+      const buffered = this.#buffed.get(id);
+      if (buffered) {
+        for (const c of buffered) this.cb.onPcm(c);
+        this.#buffed.delete(id);
+      }
+      if (this.#ended.has(id)) {
+        this.#head += 1; // this sentence is done — move to the next
+        continue;
+      }
+      break; // head not finished yet — wait for more of its audio
+    }
+  }
+
+  /** Barge-in: drop all in-flight + buffered audio (new requests = new generation). */
   cancel(): void {
     this.#generation += 1;
     this.#active.clear();
+    this.#order = [];
+    this.#head = 0;
+    this.#buffed.clear();
+    this.#ended.clear();
   }
 
   close(): void {

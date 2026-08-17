@@ -1,6 +1,7 @@
 import { fetchContextForCaller, type RawContextData } from './taleemabad-api.js';
 import { getUserMemory, getRumiProfile, getRecentRumiMessages } from '../db.js';
 import { getCurriculumSlice, curriculumStatus } from '../curriculum.js';
+import { config } from '../config.js';
 
 /**
  * Builds Noor's system instructions. Mirrors the browser agent's ORIGINAL
@@ -258,7 +259,15 @@ export const buildNoorContext = async (
     console.warn(`[rumi] profile lookup failed for ${fromNumber}:`, String(err));
   }
 
+  // On the Uplift voice path, Noor's TEXT is spoken by an Urdu TTS — so the
+  // script/spelling matters. Force clean Urdu script (this is a no-op for the
+  // default OpenAI voice, which speaks audio directly).
+  const scriptLine =
+    config.voiceProvider === 'uplift' && config.uplift.apiKey
+      ? `\n\nCRITICAL — HOW TO WRITE YOUR REPLIES: your reply text is read aloud by an Urdu text-to-speech voice, so write EVERY reply in proper Urdu (Nastaliq / Perso-Arabic) script ONLY. Never use Roman/Latin-letter Urdu, and never Hindi/Devanagari. Write numbers as Urdu words. Avoid English words when a natural Urdu word exists; if an English term is unavoidable, write it phonetically in Urdu script. Punctuate cleanly with ۔ and ؟ so sentences read naturally aloud.`
+      : '';
+
   return {
-    instructions: `${BASE_PROMPT}${greeting}${dateLine}${memorySection}${context}${curriculumSection}${rumiSection}`,
+    instructions: `${BASE_PROMPT}${scriptLine}${greeting}${dateLine}${memorySection}${context}${curriculumSection}${rumiSection}`,
   };
 };

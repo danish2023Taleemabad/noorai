@@ -7,6 +7,7 @@ import {
 } from './whatsapp/webhook.js';
 import { initDb } from './db.js';
 import { loadCurriculum } from './curriculum.js';
+import { loadAmbience } from './bridge/ambience.js';
 
 /**
  * Noor — WhatsApp voice agent server.
@@ -45,4 +46,6 @@ app.listen(config.port, () => {
   // Load the curriculum matrix into RAM once, off the call path (no-op if the
   // Google service account isn't configured). Never blocks calls.
   void loadCurriculum();
+  // Load background ambience PCM once (office chatter + keyboard typing).
+  loadAmbience();
 });

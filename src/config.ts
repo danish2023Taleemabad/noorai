@@ -64,6 +64,15 @@ export const config = {
     accessToken: env('TALEEMABAD_ACCESS_TOKEN'),
   },
 
+  // Background ambience mixed into the call audio: office chatter (constant, low)
+  // + keyboard typing (only while Noor is looking something up). Low volumes so
+  // it sits under Noor's voice. Disable with AMBIENCE_ENABLED=false.
+  ambience: {
+    enabled: env('AMBIENCE_ENABLED', false, 'true') !== 'false',
+    officeVolume: Number(env('AMBIENCE_OFFICE_VOLUME', false, '0.10')),
+    keyboardVolume: Number(env('AMBIENCE_KEYBOARD_VOLUME', false, '0.22')),
+  },
+
   // Uplift AI TTS — used as Noor's "mouth" only when voiceProvider === 'uplift'
   // and an API key is set. OpenAI still does everything else.
   uplift: {

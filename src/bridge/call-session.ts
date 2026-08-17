@@ -18,6 +18,7 @@ import {
 import { syncCallerDelta } from '../rumi-sync.js';
 import { embedTexts } from '../embeddings.js';
 import { UpliftTtsSession, UPLIFT_RATE } from './uplift-tts.js';
+import { AmbienceMixer, ambienceReady } from './ambience.js';
 import {
   downmixToMono,
   resampleLinear,
@@ -126,6 +127,9 @@ export class CallSession {
   #responseText = ''; // full text of the in-flight response (for the transcript)
   #speechStoppedAt = 0; // for Uplift-path response-latency timing
 
+  // Background ambience (office chatter always; keyboard typing during lookups).
+  #ambience: AmbienceMixer | null = null;
+
   constructor(
     public readonly callId: string,
     public readonly fromNumber: string,
@@ -163,6 +167,9 @@ export class CallSession {
       iceTransportPolicy: config.turn.forceRelay ? 'relay' : 'all',
     });
     this.#pc = pc;
+
+    // Background ambience (office chatter from the moment the call connects).
+    if (ambienceReady()) this.#ambience = new AmbienceMixer();
 
     // Outgoing audio (Noor -> caller).
     this.#audioSource = new RTCAudioSource();
@@ -205,6 +212,7 @@ export class CallSession {
       onAudio: (pcm24k) => {
         if (this.#closed) return; // ignore any late deltas after teardown
         this.#lastActivityAt = Date.now(); // Noor is speaking = activity
+        this.#ambience?.setTyping(false); // Noor is answering — stop the typing sfx
         if (!firstAudioLogged) {
           firstAudioLogged = true;
           console.log(`${this.#tag} 🔊 first Noor audio -> caller`);
@@ -266,6 +274,9 @@ export class CallSession {
         if (full) this.#transcript.push({ role: 'noor', text: full });
       },
       onToolCall: async (name, args) => {
+        // Noor is looking something up → play the keyboard-typing ambience until
+        // she starts answering (turned off when her next audio arrives).
+        this.#ambience?.setTyping(true);
         if (name === 'lookup_curriculum') {
           const grade = String(args.grade ?? '');
           const subject = String(args.subject ?? '');
@@ -481,6 +492,7 @@ export class CallSession {
   #onUpliftPcm(pcm22k: Int16Array): void {
     if (this.#closed) return;
     this.#lastActivityAt = Date.now(); // Noor is speaking = activity
+    this.#ambience?.setTyping(false); // Noor is answering — stop the typing sfx
     if (this.#speechStoppedAt) {
       const ms = Date.now() - this.#speechStoppedAt;
       this.#speechStoppedAt = 0;
@@ -518,9 +530,11 @@ export class CallSession {
     this.#playing = false;
   }
 
-  #emitSilence(): void {
+  /** Emit one 480-sample frame to the caller, with background ambience mixed in. */
+  #emitFrame(frame: Int16Array): void {
+    this.#ambience?.mixInto(frame);
     this.#audioSource.onData({
-      samples: new Int16Array(FRAME_SAMPLES_48K),
+      samples: frame,
       sampleRate: WHATSAPP_RATE,
       bitsPerSample: 16,
       channelCount: 1,
@@ -528,49 +542,39 @@ export class CallSession {
     });
   }
 
-  /** Emit one 480-sample (10ms) frame per tick; pad with silence when idle. */
+  /** Emit one 480-sample (10ms) frame per tick: Noor's audio when available,
+   *  otherwise silence — with ambience mixed into EVERY frame (so office chatter
+   *  plays throughout, including while Noor isn't speaking). */
   #startPlayout(): void {
     this.#playoutTimer = setInterval(() => {
       if (this.#closed || !this.#audioSource) return;
 
-      // Jitter buffer: hold playback (send silence) until enough audio is queued,
-      // and re-arm the cushion after an underrun.
+      // Jitter buffer: don't start until enough audio is queued; re-arm after underrun.
       if (!this.#playing) {
-        if (this.#buffered >= PREBUFFER_SAMPLES) {
-          this.#playing = true;
-        } else {
-          this.#emitSilence();
-          return;
-        }
+        if (this.#buffered >= PREBUFFER_SAMPLES) this.#playing = true;
       } else if (this.#buffered === 0) {
         this.#playing = false;
-        this.#emitSilence();
-        return;
       }
 
       const frame = new Int16Array(FRAME_SAMPLES_48K);
-      let filled = 0;
-      while (filled < FRAME_SAMPLES_48K && this.#chunks.length > 0) {
-        const chunk = this.#chunks[0];
-        const avail = chunk.length - this.#head;
-        const need = FRAME_SAMPLES_48K - filled;
-        const n = Math.min(avail, need);
-        frame.set(chunk.subarray(this.#head, this.#head + n), filled);
-        filled += n;
-        this.#head += n;
-        this.#buffered -= n;
-        if (this.#head >= chunk.length) {
-          this.#chunks.shift();
-          this.#head = 0;
+      if (this.#playing && this.#buffered > 0) {
+        let filled = 0;
+        while (filled < FRAME_SAMPLES_48K && this.#chunks.length > 0) {
+          const chunk = this.#chunks[0];
+          const avail = chunk.length - this.#head;
+          const need = FRAME_SAMPLES_48K - filled;
+          const n = Math.min(avail, need);
+          frame.set(chunk.subarray(this.#head, this.#head + n), filled);
+          filled += n;
+          this.#head += n;
+          this.#buffered -= n;
+          if (this.#head >= chunk.length) {
+            this.#chunks.shift();
+            this.#head = 0;
+          }
         }
       }
-      this.#audioSource.onData({
-        samples: frame,
-        sampleRate: WHATSAPP_RATE,
-        bitsPerSample: 16,
-        channelCount: 1,
-        numberOfFrames: FRAME_SAMPLES_48K,
-      });
+      this.#emitFrame(frame); // ambience mixed in (voice frame or silence)
     }, FRAME_MS);
   }
 
@@ -611,6 +615,8 @@ export class CallSession {
       /* noop */
     }
     this.#uplift = null;
+    this.#ambience?.dispose();
+    this.#ambience = null;
     try {
       this.#pc?.close();
     } catch {

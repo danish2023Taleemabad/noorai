@@ -36,6 +36,12 @@ export const config = {
     graphVersion: env('WHATSAPP_GRAPH_VERSION', false, 'v21.0'),
   },
 
+  // Which engine produces Noor's VOICE. 'openai' (default) = OpenAI Realtime
+  // speaks natively (unchanged). 'uplift' = OpenAI still does STT/reasoning/tools
+  // but outputs TEXT, which is spoken by Uplift's Urdu TTS. Falls back to 'openai'
+  // per-call if Uplift can't connect.
+  voiceProvider: env('VOICE_PROVIDER', false, 'openai'),
+
   openai: {
     apiKey: env('OPENAI_API_KEY', true),
     model: env('OPENAI_REALTIME_MODEL', false, 'gpt-realtime-2.1'),
@@ -56,6 +62,18 @@ export const config = {
   taleemabad: {
     baseUrl: env('TALEEMABAD_BASE_URL', false, 'https://schools.niete.pk'),
     accessToken: env('TALEEMABAD_ACCESS_TOKEN'),
+  },
+
+  // Uplift AI TTS — used as Noor's "mouth" only when voiceProvider === 'uplift'
+  // and an API key is set. OpenAI still does everything else.
+  uplift: {
+    apiKey: env('UPLIFT_API_KEY'),
+    voiceId: env('UPLIFT_VOICE_ID', false, 'v_meklc281'), // Urdu female
+    wsUrl: env(
+      'UPLIFT_WS_URL',
+      false,
+      'wss://api.upliftai.org/text-to-speech/multi-stream',
+    ),
   },
 
   // Google service account (read-only) used ONCE at boot to load the curriculum

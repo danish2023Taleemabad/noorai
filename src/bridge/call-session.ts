@@ -17,6 +17,7 @@ import {
 } from '../db.js';
 import { syncCallerDelta } from '../rumi-sync.js';
 import { embedTexts } from '../embeddings.js';
+import { UpliftTtsSession, UPLIFT_RATE } from './uplift-tts.js';
 import {
   downmixToMono,
   resampleLinear,
@@ -24,6 +25,28 @@ import {
   OPENAI_RATE,
   WHATSAPP_RATE,
 } from './audio.js';
+
+/** Split accumulated text into complete sentences + a remainder, for streaming
+ *  to TTS. Flushes a long run-on even without punctuation to bound latency. */
+const splitSentences = (buf: string): { sentences: string[]; rest: string } => {
+  const sentences: string[] = [];
+  let rest = buf;
+  // Sentence enders incl. Urdu full-stop (۔) and question mark (؟).
+  const re = /[^.!?۔؟\n]*[.!?۔؟\n]+/g;
+  let m: RegExpExecArray | null;
+  let lastIdx = 0;
+  while ((m = re.exec(buf)) !== null) {
+    sentences.push(m[0].trim());
+    lastIdx = re.lastIndex;
+  }
+  rest = buf.slice(lastIdx);
+  if (rest.length > 180) {
+    // No punctuation for a long time — flush what we have.
+    sentences.push(rest.trim());
+    rest = '';
+  }
+  return { sentences: sentences.filter(Boolean), rest };
+};
 
 /**
  * One live WhatsApp call bridged to one OpenAI Realtime session.
@@ -95,6 +118,12 @@ export class CallSession {
   // Ordered transcript of the call (caller + Noor turns), for the DB log.
   #transcript: { role: 'caller' | 'noor'; text: string }[] = [];
 
+  // Uplift voice path (only when VOICE_PROVIDER=uplift and connect succeeds).
+  #uplift: UpliftTtsSession | null = null;
+  #textBuf = ''; // accumulates OpenAI text deltas until a sentence is ready
+  #responseText = ''; // full text of the in-flight response (for the transcript)
+  #speechStoppedAt = 0; // for Uplift-path response-latency timing
+
   constructor(
     public readonly callId: string,
     public readonly fromNumber: string,
@@ -138,10 +167,36 @@ export class CallSession {
     const outTrack = this.#audioSource.createTrack();
     pc.addTrack(outTrack);
 
+    // Decide Noor's voice engine. Uplift is used only when configured; if it
+    // can't connect we fall back to the OpenAI voice for THIS call and nothing
+    // else changes. We kick off the connect here so it overlaps buildNoorContext.
+    let useUplift = config.voiceProvider === 'uplift' && Boolean(config.uplift.apiKey);
+    let upliftConnect: Promise<void> | null = null;
+    if (useUplift) {
+      this.#uplift = new UpliftTtsSession({
+        onPcm: (pcm) => this.#onUpliftPcm(pcm),
+        onError: (e) => console.warn(`${this.#tag} [uplift] ${String(e).slice(0, 120)}`),
+      });
+      upliftConnect = this.#uplift.connect();
+    }
+
     const { instructions } = await buildNoorContext(
       this.fromNumber,
       this.callerName,
     );
+
+    if (useUplift && upliftConnect) {
+      await upliftConnect;
+      if (!this.#uplift?.ready) {
+        console.warn(`${this.#tag} [uplift] not ready — using OpenAI voice this call`);
+        this.#uplift?.close();
+        this.#uplift = null;
+        useUplift = false;
+      } else {
+        console.log(`${this.#tag} [uplift] ready — Noor's voice via Uplift (Urdu)`);
+      }
+    }
+
     let firstAudioLogged = false;
     this.#realtime = new OpenAIRealtimeSession(instructions, {
       onAudio: (pcm24k) => {
@@ -156,6 +211,12 @@ export class CallSession {
       onResponseStarted: () => {
         console.log(`${this.#tag} caller speaking (barge-in) — flushing playout`);
         this.#flushPlayout();
+        if (this.#uplift) {
+          // Drop in-flight Uplift audio + any half-buffered text.
+          this.#uplift.cancel();
+          this.#textBuf = '';
+          this.#responseText = '';
+        }
       },
       onOpen: () => console.log(`${this.#tag} OpenAI Realtime connected`),
       onTranscript: (role, text) => {
@@ -167,12 +228,34 @@ export class CallSession {
       },
       onResponseLatency: (ms) => {
         // Quantitative responsiveness metric — logged off the audio path.
+        // (OpenAI voice path; the Uplift path logs its own in #onUpliftPcm.)
         console.log(`${this.#tag} [latency] response ${ms}ms`);
         void logResponseLatency({
           waCallId: this.callId,
           callerNumber: this.fromNumber,
           latencyMs: ms,
         }).catch(() => undefined);
+      },
+      // --- Uplift voice path only (no-ops when OpenAI is the voice) ---
+      onSpeechStopped: () => {
+        if (this.#uplift) this.#speechStoppedAt = Date.now();
+      },
+      onTextDelta: (delta) => {
+        if (this.#closed || !this.#uplift) return;
+        this.#responseText += delta;
+        this.#textBuf += delta;
+        const { sentences, rest } = splitSentences(this.#textBuf);
+        this.#textBuf = rest;
+        for (const s of sentences) this.#uplift.speak(s);
+      },
+      onTextDone: (text) => {
+        if (this.#closed || !this.#uplift) return;
+        const tail = this.#textBuf.trim();
+        if (tail) this.#uplift.speak(tail);
+        this.#textBuf = '';
+        const full = (this.#responseText || text).trim();
+        this.#responseText = '';
+        if (full) this.#transcript.push({ role: 'noor', text: full });
       },
       onToolCall: async (name, args) => {
         if (name === 'lookup_curriculum') {
@@ -262,7 +345,7 @@ export class CallSession {
         console.log(`${this.#tag} OpenAI Realtime closed`);
         this.close();
       },
-    });
+    }, useUplift ? 'text' : 'audio');
     this.#realtime.connect();
 
     // Fire-and-forget: pull anything this caller sent to Rumi since our last
@@ -385,6 +468,24 @@ export class CallSession {
     }, WATCHDOG_TICK_MS);
   }
 
+  /** Uplift TTS audio (22.05 kHz) → resample to 24 kHz → same playout path as
+   *  the OpenAI voice. Also counts as Noor activity and times response latency. */
+  #onUpliftPcm(pcm22k: Int16Array): void {
+    if (this.#closed) return;
+    this.#lastActivityAt = Date.now(); // Noor is speaking = activity
+    if (this.#speechStoppedAt) {
+      const ms = Date.now() - this.#speechStoppedAt;
+      this.#speechStoppedAt = 0;
+      console.log(`${this.#tag} [latency] response ${ms}ms`);
+      void logResponseLatency({
+        waCallId: this.callId,
+        callerNumber: this.fromNumber,
+        latencyMs: ms,
+      }).catch(() => undefined);
+    }
+    this.#enqueuePlayout(resampleLinear(pcm22k, UPLIFT_RATE, OPENAI_RATE));
+  }
+
   #enqueuePlayout(pcm24k: Int16Array): void {
     const pcm48k = upsample24to48(pcm24k);
     this.#chunks.push(pcm48k);
@@ -491,6 +592,12 @@ export class CallSession {
     }
     this.#realtime?.close();
     this.#realtime = null;
+    try {
+      this.#uplift?.close();
+    } catch {
+      /* noop */
+    }
+    this.#uplift = null;
     try {
       this.#pc?.close();
     } catch {

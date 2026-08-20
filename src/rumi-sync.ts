@@ -315,7 +315,10 @@ const renderItem = (x: any): string => {
   if (x == null) return '';
   if (typeof x === 'string') return x.trim();
   if (typeof x === 'object') {
-    const t = x.title ?? x.description ?? x.text ?? x.point ?? x.detail ?? x.summary ?? x.recommendation;
+    const t =
+      x.title_en ?? x.title ?? x.title_sw ?? x.description ?? x.text ?? x.point ??
+      x.detail ?? x.summary ?? x.summary_sw ?? x.recommendation ?? x.try_sw ??
+      x.improvement_sw ?? x.evidence_sw ?? x.focus;
     return t ? String(t).trim() : jstr(x, 200);
   }
   return String(x);
@@ -327,18 +330,58 @@ const renderVal = (v: any): string => {
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-const fmtCoaching = (r: any): string => {
+const fmtCoaching = (r: any, isObserver = false): string => {
   const a = r.analysis_data ?? {};
   const scores = a.scores ?? {};
   const overall = scores.percentage ?? scores.overall_percentage ?? scores.overall ?? null;
-  let text = `Coaching observation${a.framework ? ` (${a.framework})` : ''}${r.observation_type ? ` [${r.observation_type}]` : ''}`;
+  const date = r.created_at ? new Date(r.created_at).toISOString().slice(0, 10) : '';
+  // Perspective: the caller may be the observed teacher, or the OBSERVER (AEO /
+  // leader) who observed another teacher — so say clearly WHO observed WHOM.
+  let who: string;
+  if (isObserver) {
+    const teacher = r.teacher_name ? String(r.teacher_name) : 'a teacher';
+    const school = r.teacher_school ? ` at ${r.teacher_school}` : '';
+    who = `You (the observer) observed ${teacher}${school}${date ? ` on ${date}` : ''}`;
+  } else if (r.observer_name) {
+    who = `Your class was observed by ${r.observer_name}${date ? ` on ${date}` : ''}`;
+  } else {
+    who = `Your coaching observation${date ? ` on ${date}` : ''}`;
+  }
+  let text = who + (a.framework ? ` (framework ${a.framework})` : '') + (r.observation_type ? ` [${r.observation_type}]` : '');
   const subj = [a.topic, a.subject].filter(Boolean).join(' / ');
-  if (subj) text += ` on ${subj}`;
+  if (subj) text += `, lesson: ${subj}`;
   if (overall != null) text += `, overall score ${overall}%`;
+  if (a.performance_band) text += `, band: ${a.performance_band}`;
   if (scores.grand_total != null && scores.max_marks != null)
     text += ` (${scores.grand_total}/${scores.max_marks} marks)`;
   text += '.';
-  // Per-goal / per-domain labelled breakdown (keys like goal5_classroom_management).
+
+  // (A) Nested `domains` object (MEWAKA etc.): per-domain score % + the WHY
+  // (first indicator's improvement/evidence note) so "why did they score low
+  // in X" is answerable.
+  if (a.domains && typeof a.domains === 'object' && !Array.isArray(a.domains)) {
+    const lines: string[] = [];
+    for (const [key, dv] of Object.entries<any>(a.domains)) {
+      if (!dv || typeof dv !== 'object') continue;
+      const label = dv.title_en || dv.title || key.replace(/_/g, ' ');
+      const sc = dv.area_score ?? dv.domain_score ?? dv.score;
+      const mx = dv.area_max ?? dv.domain_max ?? dv.max;
+      let line = String(label);
+      if (sc != null && mx) line += `: ${Math.round((100 * sc) / mx)}% (${sc}/${mx})`;
+      else if (sc != null) line += `: ${sc}`;
+      const inds = Array.isArray(dv.indicators) ? dv.indicators : [];
+      const why = inds
+        .map((ind: any) => ind?.improvement_sw || ind?.improvement || ind?.evidence_sw || ind?.evidence)
+        .filter(Boolean)
+        .slice(0, 1)
+        .join('');
+      if (why) line += ` — ${String(why).slice(0, 180)}`;
+      lines.push(line);
+    }
+    if (lines.length) text += ` Domain breakdown: ${lines.join('; ')}.`;
+  }
+
+  // (B) Top-level goalN_/domainN_ keys (Punjab/FICO framework).
   const goalLines: string[] = [];
   for (const [k, v] of Object.entries<any>(a)) {
     if (!/^goal\d|^domain\d/.test(k)) continue;
@@ -354,17 +397,21 @@ const fmtCoaching = (r: any): string => {
     } else if (tot != null) goalLines.push(`${label}: ${tot}`);
   }
   if (goalLines.length) text += ` Breakdown — ${goalLines.join('; ')}.`;
-  for (const key of ['executive_summary', 'strengths', 'growth_opportunities', 'recommendations', 'areas_for_improvement', 'debrief_reflection', 'notable_moments', 'feedback', 'summary']) {
+
+  // (C) Narrative fields (both frameworks; _sw fields carry the local-language text).
+  for (const key of ['executive_summary', 'summary', 'summary_sw', 'strengths', 'growth_opportunities', 'recommendations', 'areas_for_improvement', 'focus_area', 'focus_area_sw', 'debrief_reflection', 'notable_moments', 'feedback']) {
     const s = renderVal(a[key]);
-    if (s) text += ` ${key.replace(/_/g, ' ')}: ${s.slice(0, 500)}.`;
+    if (s) text += ` ${key.replace(/_/g, ' ')}: ${s.slice(0, 400)}.`;
   }
+  if (a.observer_debrief && typeof a.observer_debrief === 'object' && a.observer_debrief.transcript)
+    text += ` Observer debrief: ${String(a.observer_debrief.transcript).replace(/\s+/g, ' ').slice(0, 300)}.`;
   if (r.prioritized_action) {
     const pa = typeof r.prioritized_action === 'string' ? r.prioritized_action : jstr(r.prioritized_action, 400);
     text += ` Prioritized action: ${pa}.`;
   }
   if (r.transcript_text)
-    text += ` Lesson transcript excerpt: ${String(r.transcript_text).replace(/\s+/g, ' ').slice(0, 600)}.`;
-  return text.slice(0, 4000);
+    text += ` Lesson transcript excerpt: ${String(r.transcript_text).replace(/\s+/g, ' ').slice(0, 500)}.`;
+  return text.slice(0, 4500);
 };
 
 const fmtLessonPlan = (r: any): string => {
@@ -639,10 +686,37 @@ export async function syncCallerDelta(
       if (isDelta) injectable.push({ role: m.role, content: m.content, createdAt: m.created_at });
     }
 
-    // New structured records (index-backed by user_id).
+    // Coaching / observations — BOTH sides: sessions where the caller was the
+    // subject, AND sessions the caller CONDUCTED as an observer (AEO / leader).
+    // Observer-side docs get the observed teacher's name + school so Noor can
+    // answer "which teacher did I observe" and "why did X score that way".
+    {
+      const wm = wmDoc.coaching ?? null;
+      const idSet = new Set(userIds.map(String));
+      const res = await rumi.query(
+        `SELECT x.id, x.analysis_data, x.observation_type, x.prioritized_action,
+                x.transcript_text, x.created_at, x.observer_user_id,
+                tu.name AS teacher_name, tu.school_name AS teacher_school,
+                ou.name AS observer_name
+           FROM coaching_sessions x
+           LEFT JOIN users tu ON tu.id = x.user_id
+           LEFT JOIN users ou ON ou.id = x.observer_user_id
+          WHERE (x.user_id = ANY($1::uuid[]) OR x.observer_user_id = ANY($1::uuid[]))
+            ${wm ? 'AND x.created_at > $2' : ''}
+          ORDER BY x.created_at ASC LIMIT 500`,
+        wm ? [userIds, wm] : [userIds],
+      );
+      for (const r of res.rows) {
+        const isObserver = Boolean(r.observer_user_id) && idSet.has(String(r.observer_user_id));
+        const content = fmtCoaching(r, isObserver);
+        // Distinct id per perspective so observer + subject docs never collide.
+        const docId = isObserver ? `coaching:${r.id}:obs` : `coaching:${r.id}`;
+        if (content) await upsertRumiDoc(docId, phone, 'coaching', content, r.created_at);
+      }
+    }
+
+    // Other structured records (subject only, index-backed by user_id).
     const kinds: { kind: string; table: string; cols: string; fmt: (r: any) => string }[] = [
-      { kind: 'coaching', table: 'coaching_sessions', fmt: fmtCoaching,
-        cols: 'x.id, x.analysis_data, x.observation_type, x.prioritized_action, x.photo_analysis, x.transcript_text, x.created_at' },
       { kind: 'lesson_plan', table: 'lesson_plans', fmt: fmtLessonPlan,
         cols: 'x.id, x.topic, x.grade, x.subject, x.type, x.content, x.lesson_plan_html, x.created_at' },
       { kind: 'reading', table: 'reading_assessments', fmt: fmtReading,

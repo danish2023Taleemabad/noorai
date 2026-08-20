@@ -199,10 +199,11 @@ export class OpenAIRealtimeSession {
           type: 'function',
           name: 'recall_rumi',
           description:
-            "Answer ANY question about the caller's history with Rumi — not just chats, but their coaching/observation " +
-            'scores and feedback (e.g. "why did Rumi score me low"), the lesson plans Rumi made for them (e.g. "rephrase my ' +
-            'lesson plan"), reading assessments, and quizzes. Pass the caller\'s question or topic; returns the most ' +
-            'relevant records. Prefer this for open-ended "why/what/how" questions about their Rumi activity.',
+            "Answer ANY question about the caller's history with Rumi — their coaching/observation scores and feedback " +
+            '(e.g. "why did I score low"), the lesson plans Rumi made (e.g. "rephrase my lesson plan"), reading assessments, ' +
+            'and quizzes. ALSO covers observations the caller CONDUCTED as an observer/AEO/leader — e.g. "which teacher did I ' +
+            'observe recently?", "what was the observation for <teacher> at <school>?", "why did that teacher score that way?". ' +
+            "Pass the caller's question or topic; returns the most relevant records. Prefer this for open-ended why/what/how questions.",
           parameters: {
             type: 'object',
             properties: {

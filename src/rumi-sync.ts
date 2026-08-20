@@ -348,7 +348,7 @@ const fmtCoaching = (r: any, isObserver = false): string => {
     who = `Your coaching observation${date ? ` on ${date}` : ''}`;
   }
   let text = who + (a.framework ? ` (framework ${a.framework})` : '') + (r.observation_type ? ` [${r.observation_type}]` : '');
-  const subj = [a.topic, a.subject].filter(Boolean).join(' / ');
+  const subj = [a.topic, a.subject, a.reflective_corpus?.analysis?.subject_topic].filter(Boolean).join(' / ');
   if (subj) text += `, lesson: ${subj}`;
   if (overall != null) text += `, overall score ${overall}%`;
   if (a.performance_band) text += `, band: ${a.performance_band}`;
@@ -381,6 +381,22 @@ const fmtCoaching = (r: any, isObserver = false): string => {
     if (lines.length) text += ` Domain breakdown: ${lines.join('; ')}.`;
   }
 
+  // (A2) `practices` array (chat /observe framework): each observed practice +
+  // level + the improvement note (the WHY).
+  if (Array.isArray(a.practices) && a.practices.length) {
+    const lines = a.practices.map((p: any) => {
+      const name = p.practice_text || p.practice_key || 'practice';
+      const lvl = p.observed
+        ? String(p.observed).replace(/_/g, ' ')
+        : p.observed_score != null
+          ? `score ${p.observed_score}`
+          : '';
+      const why = p.improvement_en || p.evidence_en || p.improvement_sw || p.evidence_sw;
+      return `${name}${lvl ? `: ${lvl}` : ''}${why ? ` — ${String(why).slice(0, 120)}` : ''}`;
+    });
+    text += ` Practices observed: ${lines.slice(0, 12).join('; ')}.`;
+  }
+
   // (B) Top-level goalN_/domainN_ keys (Punjab/FICO framework).
   const goalLines: string[] = [];
   for (const [k, v] of Object.entries<any>(a)) {
@@ -398,10 +414,16 @@ const fmtCoaching = (r: any, isObserver = false): string => {
   }
   if (goalLines.length) text += ` Breakdown — ${goalLines.join('; ')}.`;
 
-  // (C) Narrative fields (both frameworks; _sw fields carry the local-language text).
-  for (const key of ['executive_summary', 'summary', 'summary_sw', 'strengths', 'growth_opportunities', 'recommendations', 'areas_for_improvement', 'focus_area', 'focus_area_sw', 'debrief_reflection', 'notable_moments', 'feedback']) {
+  // (C) Narrative fields across frameworks (_sw = local language, _en = English).
+  for (const key of ['executive_summary', 'executive_summary_en', 'summary', 'summary_sw', 'strengths', 'growth_opportunities', 'recommendations', 'areas_for_improvement', 'focus_area', 'focus_area_sw', 'debrief_reflection', 'notable_moments', 'feedback']) {
     const s = renderVal(a[key]);
     if (s) text += ` ${key.replace(/_/g, ' ')}: ${s.slice(0, 400)}.`;
+  }
+  // reflective_corpus (chat /observe): topic + one-line summary + focus area.
+  const rc = a.reflective_corpus?.analysis;
+  if (rc && typeof rc === 'object') {
+    if (rc.one_line_summary) text += ` Summary: ${String(rc.one_line_summary).slice(0, 300)}.`;
+    if (rc.focus_area_en) text += ` Focus area: ${String(rc.focus_area_en).slice(0, 200)}.`;
   }
   if (a.observer_debrief && typeof a.observer_debrief === 'object' && a.observer_debrief.transcript)
     text += ` Observer debrief: ${String(a.observer_debrief.transcript).replace(/\s+/g, ' ').slice(0, 300)}.`;

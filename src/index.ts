@@ -1,4 +1,4 @@
-import express from 'express';
+import express, { type Request } from 'express';
 import { config } from './config.js';
 import {
   verifyWebhook,
@@ -8,6 +8,7 @@ import {
 import { initDb } from './db.js';
 import { loadCurriculum } from './curriculum.js';
 import { loadAmbience } from './bridge/ambience.js';
+import { handleOpenAISipWebhook } from './bridge/openai-sip.js';
 
 /**
  * Noor — WhatsApp voice agent server.
@@ -17,7 +18,13 @@ import { loadAmbience } from './bridge/ambience.js';
  */
 
 const app = express();
-app.use(express.json({ limit: '2mb' }));
+// Capture the raw body so the OpenAI SIP webhook signature can be verified.
+app.use(express.json({
+  limit: '2mb',
+  verify: (req, _res, buf) => {
+    (req as Request & { rawBody?: Buffer }).rawBody = buf;
+  },
+}));
 
 // Health check.
 app.get('/', (_req, res) => {
@@ -28,6 +35,11 @@ app.get('/', (_req, res) => {
 app.get('/webhook', verifyWebhook);
 app.post('/webhook', receiveWebhook);
 
+// Phone-call path: OpenAI native SIP. Point a SIP trunk/DID at
+// sip:<PROJECT_ID>@sip.api.openai.com and set this URL as the project's webhook
+// (platform.openai.com → Settings → Project → Webhooks).
+app.post('/openai/call', handleOpenAISipWebhook);
+
 app.listen(config.port, () => {
   console.log(`Noor listening on :${config.port}`);
   console.log(`  model=${config.openai.model} voice=${config.openai.voice} ` +
@@ -36,7 +48,10 @@ app.listen(config.port, () => {
     (config.openai.turnDetection === 'server_vad' ? ` vad=${config.openai.vadSilenceMs}ms` : ''));
   console.log(`  WhatsApp phone_number_id=${config.whatsapp.phoneNumberId}`);
   if (config.publicBaseUrl) {
-    console.log(`  webhook: ${config.publicBaseUrl.replace(/\/+$/, '')}/webhook`);
+    const base = config.publicBaseUrl.replace(/\/+$/, '');
+    console.log(`  webhook: ${base}/webhook`);
+    console.log(`  SIP call webhook: ${base}/openai/call ` +
+      `(signature ${config.openai.webhookSecret ? 'verified' : 'DISABLED — set OPENAI_WEBHOOK_SECRET'})`);
   }
   // Connect the call-log DB (no-op if DATABASE_URL isn't set). Rumi history is
   // kept fresh per-caller at connect (see syncCallerDelta) rather than by a

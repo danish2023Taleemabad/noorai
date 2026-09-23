@@ -46,6 +46,10 @@ export const config = {
     apiKey: env('OPENAI_API_KEY', true),
     model: env('OPENAI_REALTIME_MODEL', false, 'gpt-realtime-2.1'),
     voice: env('OPENAI_REALTIME_VOICE', false, 'marin'),
+    // For the phone-call path (FlyNumber → OpenAI native SIP → this webhook).
+    // The signing secret from platform.openai.com → Settings → Project →
+    // Webhooks (starts `whsec_`). Empty = signature check skipped (dev only).
+    webhookSecret: env('OPENAI_WEBHOOK_SECRET'),
     reasoningEffort: env('OPENAI_REASONING_EFFORT'), // '' = OpenAI default (null)
     // 'semantic_vad' (what the niete browser agent actually used — smart
     // turn-end detection, avoids overlapping responses) or 'server_vad'
